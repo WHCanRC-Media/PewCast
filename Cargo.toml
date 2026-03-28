@@ -49,9 +49,9 @@ qrcode = "0.14"
 # WebTransport
 wtransport = "0.7"
 
-# System tray
-tray-icon = "0.21"
-muda = "0.17"
+# System tray (without libxdo for Wayland compatibility)
+tray-icon = { version = "0.21", default-features = false }
+muda = { version = "0.17", default-features = false, features = ["gtk"] }
 
 # Utilities
 anyhow = "1"

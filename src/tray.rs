@@ -226,8 +226,13 @@ fn copy_to_clipboard(text: &str) {
     #[cfg(target_os = "linux")]
     {
         use std::io::Write;
-        if let Ok(mut child) = std::process::Command::new("xclip")
-            .args(["-selection", "clipboard"])
+        let (cmd, args): (&str, &[&str]) = if std::env::var("WAYLAND_DISPLAY").is_ok() {
+            ("wl-copy", &[])
+        } else {
+            ("xclip", &["-selection", "clipboard"])
+        };
+        if let Ok(mut child) = std::process::Command::new(cmd)
+            .args(args)
             .stdin(std::process::Stdio::piped())
             .spawn()
         {
