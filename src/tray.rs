@@ -5,11 +5,7 @@ use crate::audio::{list_input_devices, DeviceSwitcher};
 /// Spawn the system tray icon on a dedicated OS thread.
 /// If a DeviceSwitcher is provided, selecting a device switches live.
 /// Otherwise (e.g. test-tone mode), the device menu is shown but disabled.
-pub fn spawn_tray(
-    current_device: Option<String>,
-    switcher: Option<DeviceSwitcher>,
-    url: String,
-) {
+pub fn spawn_tray(current_device: Option<String>, switcher: Option<DeviceSwitcher>, url: String) {
     std::thread::spawn(move || {
         if let Err(e) = run_tray(current_device, switcher, url) {
             error!("System tray error: {}", e);
