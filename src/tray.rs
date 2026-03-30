@@ -317,25 +317,13 @@ fn show_log(log_path: &std::path::Path) {
 }
 
 fn create_icon() -> tray_icon::Icon {
-    let size = 16u32;
-    let mut rgba = vec![0u8; (size * size * 4) as usize];
-    let center = size as f32 / 2.0;
-    let radius = center - 1.0;
+    static ICON_PNG: &[u8] = include_bytes!("../icon.png");
 
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 - center;
-            let dy = y as f32 - center;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let idx = ((y * size + x) * 4) as usize;
-            if dist <= radius {
-                rgba[idx] = 74;
-                rgba[idx + 1] = 144;
-                rgba[idx + 2] = 217;
-                rgba[idx + 3] = 255;
-            }
-        }
-    }
+    let decoder = png::Decoder::new(std::io::Cursor::new(ICON_PNG));
+    let mut reader = decoder.read_info().expect("Failed to read icon PNG");
+    let mut buf = vec![0u8; reader.output_buffer_size().expect("Failed to get icon buffer size")];
+    let info = reader.next_frame(&mut buf).expect("Failed to decode icon PNG");
+    buf.truncate(info.buffer_size());
 
-    tray_icon::Icon::from_rgba(rgba, size, size).expect("Failed to create tray icon")
+    tray_icon::Icon::from_rgba(buf, info.width, info.height).expect("Failed to create tray icon")
 }

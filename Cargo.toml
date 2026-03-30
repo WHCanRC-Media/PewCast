@@ -54,6 +54,7 @@ tray-icon = { version = "0.21", default-features = false }
 muda = { version = "0.17", default-features = false, features = ["gtk"] }
 dirs = "6.0.0"
 nu-ansi-term = "0.50.3"
+png = "0.18.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
@@ -73,3 +74,6 @@ tokio-test = "0.4"
 reqwest = { version = "0.12", features = ["json"] }
 rustls = { version = "0.23", features = ["ring"] }
 tower = { version = "0.5", features = ["util"] }
+
+[build-dependencies]
+winresource = "0.1.31"

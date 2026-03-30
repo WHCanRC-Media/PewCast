@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#5BB8F0"/>
+      <stop offset="100%" stop-color="#2E86C9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="0" y="0" width="256" height="256" rx="40" ry="40" fill="url(#bg)"/>
+
+  <!-- Church silhouette -->
+  <g fill="white">
+    <!-- Church body -->
+    <rect x="30" y="145" width="110" height="71"/>
+    <!-- Roof -->
+    <polygon points="20,145 85,95 150,145"/>
+    <!-- Bell tower -->
+    <rect x="68" y="70" width="34" height="60"/>
+    <!-- Bell tower opening (arch) -->
+    <path d="M76,100 L76,88 A9,9 0 0 1 94,88 L94,100 Z" fill="#2E86C9"/>
+    <!-- Tower roof -->
+    <polygon points="65,70 85,48 105,70"/>
+    <!-- Cross -->
+    <rect x="82" y="22" width="6" height="30"/>
+    <rect x="74" y="30" width="22" height="6"/>
+    <!-- Door -->
+    <path d="M73,216 L73,180 A12,12 0 0 1 97,180 L97,216 Z" fill="#2E86C9"/>
+  </g>
+
+  <!-- Sound waves -->
+  <g fill="none" stroke="white" stroke-width="7" stroke-linecap="round">
+    <path d="M155,95 C175,115 175,145 155,165"/>
+    <path d="M175,75 C205,108 205,152 175,185"/>
+    <path d="M195,55 C235,98 235,162 195,205"/>
+  </g>
+</svg>
