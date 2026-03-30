@@ -1,3 +1,7 @@
+// On Windows, don't spawn a console window when launched via double-click.
+// Logs are still written to the log file and viewable via "Show Log" in the tray.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod audio;
 mod config;
 mod latency_test;
