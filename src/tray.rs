@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use tracing::{error, info};
 
 use crate::audio::{list_input_devices, DeviceSwitcher};
@@ -5,9 +7,14 @@ use crate::audio::{list_input_devices, DeviceSwitcher};
 /// Spawn the system tray icon on a dedicated OS thread.
 /// If a DeviceSwitcher is provided, selecting a device switches live.
 /// Otherwise (e.g. test-tone mode), the device menu is shown but disabled.
-pub fn spawn_tray(current_device: Option<String>, switcher: Option<DeviceSwitcher>, url: String) {
+pub fn spawn_tray(
+    current_device: Option<String>,
+    switcher: Option<DeviceSwitcher>,
+    url: String,
+    log_path: PathBuf,
+) {
     std::thread::spawn(move || {
-        if let Err(e) = run_tray(current_device, switcher, url) {
+        if let Err(e) = run_tray(current_device, switcher, url, log_path) {
             error!("System tray error: {}", e);
         }
     });
@@ -17,9 +24,13 @@ fn run_tray(
     mut current_device: Option<String>,
     switcher: Option<DeviceSwitcher>,
     url: String,
+    log_path: PathBuf,
 ) -> anyhow::Result<()> {
     use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
     use tray_icon::TrayIconBuilder;
+
+    #[cfg(target_os = "linux")]
+    gtk::init().map_err(|e| anyhow::anyhow!("Failed to initialize GTK: {}", e))?;
 
     let menu = Menu::new();
 
@@ -37,6 +48,9 @@ fn run_tray(
 
     let copy_url_item = MenuItem::new("Copy URL", true, None);
     menu.append(&copy_url_item)?;
+
+    let log_item = MenuItem::new("Show Log", true, None);
+    menu.append(&log_item)?;
 
     menu.append(&PredefinedMenuItem::separator())?;
 
@@ -70,6 +84,11 @@ fn run_tray(
             }
         }
 
+        #[cfg(target_os = "linux")]
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+
         if let Ok(event) = menu_rx.try_recv() {
             if event.id() == quit_item.id() {
                 info!("Quit requested from tray");
@@ -82,6 +101,10 @@ fn run_tray(
 
             if event.id() == copy_url_item.id() {
                 copy_to_clipboard(&url);
+            }
+
+            if event.id() == log_item.id() {
+                show_log(&log_path);
             }
 
             for (item, device_name) in &device_items {
@@ -238,6 +261,59 @@ fn copy_to_clipboard(text: &str) {
         }
     }
     info!("URL copied to clipboard");
+}
+
+fn show_log(log_path: &std::path::Path) {
+    let path = log_path.to_string_lossy();
+    info!("Opening log viewer: {}", path);
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "start",
+                "WHCanRC Log",
+                "powershell",
+                "-Command",
+                &format!("Get-Content '{}' -Wait -Tail 100", path),
+            ])
+            .spawn();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try common terminal emulators in preference order
+        let terminals: &[(&str, &[&str])] = &[
+            ("x-terminal-emulator", &["-e"]),
+            ("xdg-terminal-exec", &[]),
+            ("gnome-terminal", &["--"]),
+            ("konsole", &["-e"]),
+            ("xfce4-terminal", &["-e"]),
+            ("xterm", &["-e"]),
+        ];
+
+        for (term, args) in terminals {
+            let mut cmd = std::process::Command::new(term);
+            cmd.args(*args);
+            cmd.args(["tail", "-n", "100", "-f", &path]);
+            if cmd.spawn().is_ok() {
+                return;
+            }
+        }
+        error!("No terminal emulator found — install one or run: tail -f {}", path);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "tell application \"Terminal\" to do script \"tail -n 100 -f '{}'\"",
+            path
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn();
+    }
 }
 
 fn create_icon() -> tray_icon::Icon {

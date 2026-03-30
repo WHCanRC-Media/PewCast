@@ -53,10 +53,36 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let config = Config::load()?;
 
-    // Initialize logging
+    // Initialize logging (stderr + log file for "Show Log" tray feature)
+    let log_dir = dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("whcanrc-assisted-listening");
+    std::fs::create_dir_all(&log_dir).expect("Failed to create log directory");
+    let log_path = log_dir.join("whcanrc.log");
+    let log_file = std::sync::Mutex::new(
+        std::fs::File::create(&log_path).expect("Failed to create log file"),
+    );
     let env_filter = tracing_subscriber::EnvFilter::try_new(&config.log_level)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    {
+        // Enable ANSI escape code support on Windows console. The top-level
+        // fmt().init() does this automatically, but the registry+layer path
+        // does not, so without this the first log lines render broken colors.
+        #[cfg(target_os = "windows")]
+        let _ = nu_ansi_term::enable_ansi_support();
+
+        use tracing_subscriber::prelude::*;
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(log_file)
+                    .with_ansi(false),
+            )
+            .init();
+    }
 
     info!("WHCanRC Assisted Listening starting up");
     info!(
@@ -87,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
             config.audio_channels,
         );
         // Launch tray without device switching
-        tray::spawn_tray(cli.device.clone(), None, url.clone());
+        tray::spawn_tray(cli.device.clone(), None, url.clone(), log_path.clone());
         tx
     } else {
         let (tx, switcher) = start_audio_capture_with_switching(
@@ -96,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
             config.audio_channels,
         );
         // Launch tray with device switching
-        tray::spawn_tray(cli.device.clone(), Some(switcher), url.clone());
+        tray::spawn_tray(cli.device.clone(), Some(switcher), url.clone(), log_path.clone());
         tx
     };
 
