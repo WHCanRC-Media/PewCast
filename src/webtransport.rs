@@ -95,18 +95,40 @@ async fn handle_session_inner(
 ) -> anyhow::Result<()> {
     let session_request = incoming.await?;
 
+    let path = session_request.path().to_string();
     info!(
         "WebTransport connection from: {:?}, path: {}",
         session_request.authority(),
-        session_request.path()
+        path
     );
 
     let connection = session_request.accept().await?;
 
-    info!("WebTransport session established");
+    info!("WebTransport session established (path: {})", path);
 
-    // Stream audio via datagrams (unreliable, low latency)
-    stream_audio_datagrams(connection, audio_rx).await
+    match path.as_str() {
+        "/ping" => echo_datagrams(connection).await,
+        _ => stream_audio_datagrams(connection, audio_rx).await,
+    }
+}
+
+/// Echo datagrams back to the client for RTT measurement.
+async fn echo_datagrams(connection: wtransport::Connection) -> anyhow::Result<()> {
+    loop {
+        match connection.receive_datagram().await {
+            Ok(datagram) => {
+                let payload: &[u8] = &datagram;
+                if let Err(e) = connection.send_datagram(payload) {
+                    info!("Ping connection closed: {}", e);
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                info!("Ping connection closed: {}", e);
+                return Ok(());
+            }
+        }
+    }
 }
 
 /// Datagram header format (8 bytes):
@@ -115,7 +137,12 @@ async fn handle_session_inner(
 ///     Followed by raw PCM i16 LE samples.
 const HEADER_SIZE: usize = 8;
 
+/// Max PCM samples per datagram. 8-byte header + 240 * 2 bytes = 488 bytes,
+/// well within the QUIC datagram MTU (~1200 bytes).
+const MAX_SAMPLES_PER_DATAGRAM: usize = 240;
+
 /// Stream raw PCM i16 audio as WebTransport datagrams with header.
+/// Fragments large audio chunks into multiple datagrams that fit within the MTU.
 async fn stream_audio_datagrams(
     connection: wtransport::Connection,
     mut audio_rx: broadcast::Receiver<AudioChunk>,
@@ -131,40 +158,37 @@ async fn stream_audio_datagrams(
                     continue;
                 }
 
-                let num_samples = chunk.samples.len() as u32;
+                for fragment in chunk.samples.chunks(MAX_SAMPLES_PER_DATAGRAM) {
+                    // Build datagram: [seq(4)] [timestamp(4)] [pcm i16 LE samples...]
+                    let pcm_len = fragment.len() * 2;
+                    let mut datagram = Vec::with_capacity(HEADER_SIZE + pcm_len);
 
-                // Build datagram: [seq(4)] [timestamp(4)] [pcm i16 LE samples...]
-                let pcm_len = chunk.samples.len() * 2;
-                let mut datagram = Vec::with_capacity(HEADER_SIZE + pcm_len);
+                    // Header
+                    datagram.extend_from_slice(&seq.to_le_bytes());
+                    datagram.extend_from_slice(&sample_offset.to_le_bytes());
 
-                // Header
-                datagram.extend_from_slice(&seq.to_le_bytes());
-                datagram.extend_from_slice(&sample_offset.to_le_bytes());
+                    // PCM payload
+                    for &s in fragment {
+                        let clamped = s.clamp(-1.0, 1.0);
+                        let sample = (clamped * i16::MAX as f32) as i16;
+                        datagram.extend_from_slice(&sample.to_le_bytes());
+                    }
 
-                // PCM payload
-                for &s in &chunk.samples {
-                    let clamped = s.clamp(-1.0, 1.0);
-                    let sample = (clamped * i16::MAX as f32) as i16;
-                    datagram.extend_from_slice(&sample.to_le_bytes());
+                    // Send as datagram (unreliable, minimum latency)
+                    if let Err(e) = connection.send_datagram(&datagram) {
+                        info!("WebTransport connection closed: {}", e);
+                        return Ok(());
+                    }
+
+                    seq = seq.wrapping_add(1);
+                    sample_offset = sample_offset.wrapping_add(fragment.len() as u32);
+                    send_count += 1;
                 }
-
-                // Send as datagram (unreliable, minimum latency)
-                if let Err(e) = connection.send_datagram(&datagram) {
-                    info!("WebTransport connection closed: {}", e);
-                    return Ok(());
-                }
-
-                seq = seq.wrapping_add(1);
-                sample_offset = sample_offset.wrapping_add(num_samples);
-                send_count += 1;
 
                 if send_count.is_multiple_of(500) {
                     debug!(
-                        "[WebTransport] Sent {} datagrams (seq={}, ts={}, {} bytes each)",
-                        send_count,
-                        seq,
-                        sample_offset,
-                        datagram.len()
+                        "[WebTransport] Sent {} datagrams (seq={}, ts={})",
+                        send_count, seq, sample_offset,
                     );
                 }
             }

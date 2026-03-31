@@ -75,8 +75,27 @@ impl AudioSource for CpalAudioSource {
             device.name().unwrap_or_else(|_| "Unknown".to_string())
         );
 
+        // Determine which sample format the device supports (prefer F32, fall back to I16)
+        let use_i16 = {
+            let supported = device.supported_input_configs();
+            match supported {
+                Ok(configs) => {
+                    let formats: Vec<_> = configs.map(|c| c.sample_format()).collect();
+                    if formats.contains(&cpal::SampleFormat::F32) {
+                        false
+                    } else if formats.contains(&cpal::SampleFormat::I16) {
+                        info!("Device uses I16 sample format (will convert to F32)");
+                        true
+                    } else {
+                        false // let cpal figure it out
+                    }
+                }
+                Err(_) => false,
+            }
+        };
+
         // Try small fixed buffer sizes for low latency, fall back to default
-        let buffer_size = [256u32, 512, 1024]
+        let buffer_size = [240u32, 256, 480, 512, 1024]
             .iter()
             .find(|&&size| {
                 let test_config = cpal::StreamConfig {
@@ -85,15 +104,25 @@ impl AudioSource for CpalAudioSource {
                     buffer_size: cpal::BufferSize::Fixed(size),
                 };
                 device.supported_input_configs().is_ok_and(|_| {
-                    // Try building a dummy stream to check if the buffer size works
-                    device
-                        .build_input_stream(
-                            &test_config,
-                            |_data: &[f32], _: &cpal::InputCallbackInfo| {},
-                            |_| {},
-                            None,
-                        )
-                        .is_ok()
+                    if use_i16 {
+                        device
+                            .build_input_stream(
+                                &test_config,
+                                |_data: &[i16], _: &cpal::InputCallbackInfo| {},
+                                |_| {},
+                                None,
+                            )
+                            .is_ok()
+                    } else {
+                        device
+                            .build_input_stream(
+                                &test_config,
+                                |_data: &[f32], _: &cpal::InputCallbackInfo| {},
+                                |_| {},
+                                None,
+                            )
+                            .is_ok()
+                    }
                 })
             })
             .map(|&size| {
@@ -116,14 +145,30 @@ impl AudioSource for CpalAudioSource {
         };
 
         // Try the desired config first; if unsupported, fall back to a device-native config
-        let (actual_config, needs_conversion) = match device.build_input_stream(
-            &desired_config,
-            |_: &[f32], _: &cpal::InputCallbackInfo| {},
-            |_| {},
-            None,
-        ) {
-            Ok(_) => (desired_config.clone(), false),
-            Err(e) => {
+        let test_ok = {
+            let result = if use_i16 {
+                device.build_input_stream(
+                    &desired_config,
+                    |_: &[i16], _: &cpal::InputCallbackInfo| {},
+                    |_| {},
+                    None,
+                )
+            } else {
+                device.build_input_stream(
+                    &desired_config,
+                    |_: &[f32], _: &cpal::InputCallbackInfo| {},
+                    |_| {},
+                    None,
+                )
+            };
+            let err = result.err();
+            // test stream is dropped here, releasing the device
+            err
+        };
+
+        let (actual_config, needs_conversion) = match test_ok {
+            None => (desired_config.clone(), false),
+            Some(e) => {
                 warn!(
                     "Desired audio config ({}Hz, {}ch) not supported: {}",
                     sample_rate, channels, e
@@ -134,8 +179,14 @@ impl AudioSource for CpalAudioSource {
                     .supported_input_configs()
                     .map_err(|e| anyhow::anyhow!("Cannot query supported configs: {}", e))?;
 
+                let accepted_formats = if use_i16 {
+                    vec![cpal::SampleFormat::I16]
+                } else {
+                    vec![cpal::SampleFormat::F32]
+                };
+
                 let fallback = supported
-                    .filter(|c| c.sample_format() == cpal::SampleFormat::F32)
+                    .filter(|c| accepted_formats.contains(&c.sample_format()))
                     .min_by_key(|c| {
                         let sr = c
                             .min_sample_rate()
@@ -183,12 +234,10 @@ impl AudioSource for CpalAudioSource {
         let actual_sr = actual_config.sample_rate.0;
         let actual_ch = actual_config.channels;
 
-        let tx_err = tx.clone();
-        let stream = device.build_input_stream(
-            &actual_config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+        // Closure to convert raw samples (f32 or pre-converted from i16) into an AudioChunk
+        let make_callback = |tx: broadcast::Sender<AudioChunk>| {
+            move |data: &[f32]| {
                 let samples = if needs_conversion {
-                    // Downmix to mono if needed
                     let mono: Vec<f32> = if actual_ch > 1 {
                         data.chunks(actual_ch as usize)
                             .map(|frame| frame.iter().sum::<f32>() / actual_ch as f32)
@@ -197,7 +246,6 @@ impl AudioSource for CpalAudioSource {
                         data.to_vec()
                     };
 
-                    // Resample if needed (simple linear interpolation)
                     if actual_sr != sample_rate {
                         let ratio = sample_rate as f64 / actual_sr as f64;
                         let out_len = (mono.len() as f64 * ratio) as usize;
@@ -224,17 +272,41 @@ impl AudioSource for CpalAudioSource {
                     channels,
                 };
                 let _ = tx.send(chunk);
-            },
-            move |err| {
-                error!("Audio input stream error: {}", err);
-                let _ = tx_err.send(AudioChunk {
-                    samples: vec![],
-                    sample_rate,
-                    channels,
-                });
-            },
-            None, // no timeout
-        )?;
+            }
+        };
+
+        let tx_err = tx.clone();
+        let err_callback = move |err: cpal::StreamError| {
+            error!("Audio input stream error: {}", err);
+            let _ = tx_err.send(AudioChunk {
+                samples: vec![],
+                sample_rate,
+                channels,
+            });
+        };
+
+        let stream = if use_i16 {
+            let callback = make_callback(tx);
+            device.build_input_stream(
+                &actual_config,
+                move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                    let f32_data: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
+                    callback(&f32_data);
+                },
+                err_callback,
+                None,
+            )?
+        } else {
+            let callback = make_callback(tx);
+            device.build_input_stream(
+                &actual_config,
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    callback(data);
+                },
+                err_callback,
+                None,
+            )?
+        };
 
         stream.play()?;
         info!("Audio capture started ({}Hz, {} ch)", sample_rate, channels);
