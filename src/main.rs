@@ -203,10 +203,11 @@ async fn main() -> anyhow::Result<()> {
     info!("WebTransport available on port {}", webtransport_port);
     info!("Note: self-signed cert — accept the browser warning to connect");
 
-    // Print QR code to terminal
+    // Print QR code to terminal (compact using Unicode half-blocks)
     if let Ok(qr) = qrcode::QrCode::new(url.as_bytes()) {
+        use qrcode::render::unicode::Dense1x2;
         let rendered = qr
-            .render::<char>()
+            .render::<Dense1x2>()
             .quiet_zone(true)
             .module_dimensions(1, 1)
             .build();
