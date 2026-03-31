@@ -113,18 +113,39 @@ async fn handle_session_inner(
 }
 
 /// Echo datagrams back to the client for RTT measurement.
+/// Datagram format: [seq(4) | last_rtt_us(4)]
 async fn echo_datagrams(connection: wtransport::Connection) -> anyhow::Result<()> {
+    let mut count: u64 = 0;
+    let start = std::time::Instant::now();
     loop {
         match connection.receive_datagram().await {
             Ok(datagram) => {
                 let payload: &[u8] = &datagram;
+
+                // Parse RTT reported by client (from previous ping)
+                if payload.len() >= 8 {
+                    let seq = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+                    let rtt_us = u32::from_le_bytes(payload[4..8].try_into().unwrap());
+                    if rtt_us > 0 {
+                        let rtt_ms = rtt_us as f64 / 1000.0;
+                        if count % 20 == 0 {
+                            let elapsed = start.elapsed();
+                            info!(
+                                "Ping seq={}: RTT={:.1}ms ({} echoed, {:.1}s elapsed)",
+                                seq, rtt_ms, count, elapsed.as_secs_f64()
+                            );
+                        }
+                    }
+                }
+
                 if let Err(e) = connection.send_datagram(payload) {
-                    info!("Ping connection closed: {}", e);
+                    info!("Ping connection closed: {} ({} pings echoed)", e, count);
                     return Ok(());
                 }
+                count += 1;
             }
             Err(e) => {
-                info!("Ping connection closed: {}", e);
+                info!("Ping connection closed: {} ({} pings echoed)", e, count);
                 return Ok(());
             }
         }

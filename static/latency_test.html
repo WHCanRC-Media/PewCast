@@ -113,6 +113,20 @@
   Place phone speaker near the microphone. Click Test to play a chirp and measure how long until it returns through the server.
 </p>
 
+<div class="results" id="ping-results" style="display: none; margin-top: 24px;">
+  <h2>WebTransport Ping</h2>
+  <div class="latency-value" id="ping-value">—</div>
+  <div class="stats" id="ping-stats"></div>
+  <div style="margin-top: 10px;">
+    <button id="ping-btn" onclick="togglePing()" style="
+      padding: 8px 20px; border-radius: 20px; border: 2px solid #9c27b0;
+      background: rgba(156,39,176,0.15); color: #ce93d8;
+      font-size: 0.85rem; cursor: pointer; outline: none;
+    ">Start Ping</button>
+  </div>
+  <div class="history" id="ping-history"></div>
+</div>
+
 <div class="debug" id="debug" style="margin-top: 16px; font-family: monospace; font-size: 0.7rem; color: #555;"></div>
 
 <div class="nav">
@@ -674,6 +688,146 @@ testBtn.addEventListener('mousedown', onTestDown);
 testBtn.addEventListener('mouseup', onTestUp);
 testBtn.addEventListener('touchstart', (e) => { e.preventDefault(); onTestDown(); });
 testBtn.addEventListener('touchend', (e) => { e.preventDefault(); onTestUp(); });
+
+// --- WebTransport Ping Test ---
+let pingWt = null;
+let pingRunning = false;
+let pingInterval = null;
+let pingHistory = [];
+let pendingPings = new Map(); // seq -> sentTime
+
+const pingBtn = document.getElementById('ping-btn');
+const pingResultsEl = document.getElementById('ping-results');
+const pingValueEl = document.getElementById('ping-value');
+const pingStatsEl = document.getElementById('ping-stats');
+const pingHistoryEl = document.getElementById('ping-history');
+
+// Show ping section once we know WebTransport port is available
+function showPingIfAvailable() {
+  if (typeof WebTransport !== 'undefined' && webtransportPort) {
+    pingResultsEl.style.display = 'block';
+  }
+}
+
+async function togglePing() {
+  if (pingRunning) {
+    stopPing();
+  } else {
+    await startPing();
+  }
+}
+
+async function startPing() {
+  if (pingRunning) return;
+
+  pingBtn.textContent = 'Stop Ping';
+  pingHistory = [];
+  pendingPings.clear();
+
+  try {
+    const host = window.location.hostname;
+    const url = `https://${host}:${webtransportPort}/ping`;
+
+    const info = await fetch('/transport-info').then(r => r.json());
+    if (!info.cert_hash) throw new Error('No cert hash');
+
+    const hashBytes = Uint8Array.from(atob(info.cert_hash), c => c.charCodeAt(0));
+    pingWt = new WebTransport(url, {
+      serverCertificateHashes: [{ algorithm: 'sha-256', value: hashBytes.buffer }]
+    });
+    await pingWt.ready;
+
+    pingRunning = true;
+
+    // Read echoed datagrams
+    const reader = pingWt.datagrams.readable.getReader();
+    (async () => {
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value.byteLength < 4) continue;
+          if (value.byteLength < 8) continue;
+          const dv = new DataView(value.buffer, value.byteOffset);
+          const seq = dv.getUint32(0, true);
+          const sent = pendingPings.get(seq);
+          if (sent !== undefined) {
+            pendingPings.delete(seq);
+            const rtt = performance.now() - sent;
+            lastRttUs = Math.round(rtt * 1000); // ms -> us
+            onPingResult(rtt);
+          }
+        }
+      } catch (e) {
+        if (pingRunning) console.warn('Ping read error:', e);
+      }
+    })();
+
+    pingWt.closed.then(() => { if (pingRunning) stopPing(); }).catch(() => {});
+
+    // Send pings every 50ms (fast enough to keep WiFi radio awake)
+    let seq = 0;
+    let lastRttUs = 0;
+    const writer = pingWt.datagrams.writable.getWriter();
+    pingInterval = setInterval(() => {
+      if (!pingRunning || !pingWt) return;
+      // [seq(4) | last_rtt_us(4)] - 8 bytes
+      const buf = new Uint8Array(8);
+      const dv = new DataView(buf.buffer);
+      dv.setUint32(0, seq, true);
+      dv.setUint32(4, lastRttUs, true);
+      pendingPings.set(seq, performance.now());
+      writer.write(buf).catch(() => {});
+      seq++;
+      // Expire old pending pings (>2s)
+      const now = performance.now();
+      for (const [s, t] of pendingPings) {
+        if (now - t > 2000) pendingPings.delete(s);
+      }
+    }, 50);
+
+  } catch (e) {
+    console.error('Ping connect error:', e);
+    pingValueEl.textContent = 'Error';
+    pingBtn.textContent = 'Start Ping';
+  }
+}
+
+function stopPing() {
+  pingRunning = false;
+  if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
+  if (pingWt) { pingWt.close(); pingWt = null; }
+  pingBtn.textContent = 'Start Ping';
+}
+
+function onPingResult(rttMs) {
+  pingHistory.push(rttMs);
+  if (pingHistory.length > 50) pingHistory.shift();
+
+  const latencyClass = rttMs > 100 ? 'bad' : rttMs > 50 ? 'warn' : '';
+  pingValueEl.textContent = rttMs.toFixed(1) + ' ms';
+  pingValueEl.className = 'latency-value ' + latencyClass;
+
+  if (pingHistory.length > 1) {
+    const sorted = [...pingHistory].sort((a, b) => a - b);
+    const min = sorted[0].toFixed(1);
+    const max = sorted[sorted.length - 1].toFixed(1);
+    const avg = (sorted.reduce((a, b) => a + b, 0) / sorted.length).toFixed(1);
+    pingStatsEl.textContent = `min: ${min}ms | avg: ${avg}ms | max: ${max}ms (n=${sorted.length})`;
+  }
+
+  const items = pingHistory.slice(-10).map(l => l.toFixed(1) + 'ms').join(' → ');
+  pingHistoryEl.textContent = items;
+}
+
+// Hook into the connect flow to show ping section
+const origConnect = connect;
+connect = async function() {
+  await origConnect();
+  showPingIfAvailable();
+};
+// Also show immediately if port is already known
+if (webtransportPort) showPingIfAvailable();
 </script>
 </body>
 </html>
