@@ -64,9 +64,8 @@ async fn main() -> anyhow::Result<()> {
         .join("whcanrc-assisted-listening");
     std::fs::create_dir_all(&log_dir).expect("Failed to create log directory");
     let log_path = log_dir.join("whcanrc.log");
-    let log_file = std::sync::Mutex::new(
-        std::fs::File::create(&log_path).expect("Failed to create log file"),
-    );
+    let log_file =
+        std::sync::Mutex::new(std::fs::File::create(&log_path).expect("Failed to create log file"));
     let env_filter = tracing_subscriber::EnvFilter::try_new(&config.log_level)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     {
@@ -126,7 +125,12 @@ async fn main() -> anyhow::Result<()> {
             config.audio_channels,
         );
         // Launch tray with device switching
-        tray::spawn_tray(cli.device.clone(), Some(switcher), url.clone(), log_path.clone());
+        tray::spawn_tray(
+            cli.device.clone(),
+            Some(switcher),
+            url.clone(),
+            log_path.clone(),
+        );
         tx
     };
 

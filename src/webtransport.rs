@@ -128,11 +128,14 @@ async fn echo_datagrams(connection: wtransport::Connection) -> anyhow::Result<()
                     let rtt_us = u32::from_le_bytes(payload[4..8].try_into().unwrap());
                     if rtt_us > 0 {
                         let rtt_ms = rtt_us as f64 / 1000.0;
-                        if count % 20 == 0 {
+                        if count.is_multiple_of(20) {
                             let elapsed = start.elapsed();
                             info!(
                                 "Ping seq={}: RTT={:.1}ms ({} echoed, {:.1}s elapsed)",
-                                seq, rtt_ms, count, elapsed.as_secs_f64()
+                                seq,
+                                rtt_ms,
+                                count,
+                                elapsed.as_secs_f64()
                             );
                         }
                     }

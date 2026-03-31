@@ -161,9 +161,8 @@ impl AudioSource for CpalAudioSource {
                     None,
                 )
             };
-            let err = result.err();
             // test stream is dropped here, releasing the device
-            err
+            result.err()
         };
 
         let (actual_config, needs_conversion) = match test_ok {

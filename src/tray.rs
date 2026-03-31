@@ -301,7 +301,10 @@ fn show_log(log_path: &std::path::Path) {
                 return;
             }
         }
-        error!("No terminal emulator found — install one or run: tail -f {}", path);
+        error!(
+            "No terminal emulator found — install one or run: tail -f {}",
+            path
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -321,8 +324,15 @@ fn create_icon() -> tray_icon::Icon {
 
     let decoder = png::Decoder::new(std::io::Cursor::new(ICON_PNG));
     let mut reader = decoder.read_info().expect("Failed to read icon PNG");
-    let mut buf = vec![0u8; reader.output_buffer_size().expect("Failed to get icon buffer size")];
-    let info = reader.next_frame(&mut buf).expect("Failed to decode icon PNG");
+    let mut buf = vec![
+        0u8;
+        reader
+            .output_buffer_size()
+            .expect("Failed to get icon buffer size")
+    ];
+    let info = reader
+        .next_frame(&mut buf)
+        .expect("Failed to decode icon PNG");
     buf.truncate(info.buffer_size());
 
     tray_icon::Icon::from_rgba(buf, info.width, info.height).expect("Failed to create tray icon")
