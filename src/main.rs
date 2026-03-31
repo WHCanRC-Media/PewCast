@@ -1,6 +1,4 @@
-// On Windows, don't spawn a console window when launched via double-click.
-// Logs are still written to the log file and viewable via "Show Log" in the tray.
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+// On Windows, show console window on launch for log visibility.
 
 mod audio;
 mod config;
@@ -16,7 +14,7 @@ use std::sync::Arc;
 
 use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use tracing::{error, info};
 
 use audio::{start_audio_capture, start_audio_capture_with_switching, ToneAudioSource};
@@ -186,11 +184,15 @@ async fn main() -> anyhow::Result<()> {
     let cert_pem = cert.cert.pem();
     let key_pem = cert.key_pair.serialize_pem();
 
+    // Create shutdown signal channel
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
     // Start WebTransport server on a separate port
     let wt_server = WebTransportServer::new(webtransport_port, Arc::clone(&wt_state));
     let wt_audio_tx = audio_tx.clone();
+    let wt_shutdown_rx = shutdown_rx.clone();
     tokio::spawn(async move {
-        if let Err(e) = wt_server.run(wt_audio_tx).await {
+        if let Err(e) = wt_server.run(wt_audio_tx, wt_shutdown_rx).await {
             error!("WebTransport server error: {}", e);
         }
     });
@@ -211,9 +213,50 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("\n{}\n  {}\n", rendered, url);
     }
 
+    // Create graceful shutdown handle
+    let handle = axum_server::Handle::new();
+    let shutdown_handle = handle.clone();
+
+    // Spawn shutdown signal handler
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        info!("Shutdown signal received, stopping servers...");
+        // Signal WebTransport server to stop
+        let _ = shutdown_tx.send(true);
+        // Gracefully shutdown HTTP server
+        shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+    });
+
     axum_server::bind_rustls(addr, tls_config)
+        .handle(handle)
         .serve(app.into_make_service())
         .await?;
 
+    info!("Server stopped, ports released");
     Ok(())
+}
+
+/// Wait for shutdown signal (Ctrl+C or SIGTERM).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }

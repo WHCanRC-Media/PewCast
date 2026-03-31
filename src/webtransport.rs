@@ -7,7 +7,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, watch, RwLock};
 use tracing::{debug, info, warn};
 use wtransport::endpoint::IncomingSession;
 use wtransport::Identity;
@@ -33,7 +33,12 @@ impl WebTransportServer {
     }
 
     /// Start the WebTransport server and stream audio to connected clients.
-    pub async fn run(self, audio_tx: broadcast::Sender<AudioChunk>) -> anyhow::Result<()> {
+    /// Stops gracefully when the shutdown signal is received.
+    pub async fn run(
+        self,
+        audio_tx: broadcast::Sender<AudioChunk>,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> anyhow::Result<()> {
         // Generate self-signed identity for WebTransport
         let identity = Identity::self_signed(["localhost", "127.0.0.1", "0.0.0.0"])
             .map_err(|e| anyhow::anyhow!("Failed to create self-signed identity: {:?}", e))?;
@@ -73,11 +78,24 @@ impl WebTransportServer {
         info!("WebTransport server listening on port {}", self.port);
 
         loop {
-            let incoming = server.accept().await;
-            let audio_rx = audio_tx.subscribe();
-
-            tokio::spawn(handle_session(incoming, audio_rx));
+            tokio::select! {
+                incoming = server.accept() => {
+                    let audio_rx = audio_tx.subscribe();
+                    tokio::spawn(handle_session(incoming, audio_rx));
+                }
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        info!("WebTransport server shutting down");
+                        break;
+                    }
+                }
+            }
         }
+
+        // Drop server to release the port
+        drop(server);
+        info!("WebTransport server stopped");
+        Ok(())
     }
 }
 
