@@ -58,6 +58,7 @@ pub struct IceCandidateRequest {
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index_handler))
+        .route("/favicon.ico", get(favicon_handler))
         .route("/offer", post(offer_handler))
         .route("/ice-candidate", post(ice_candidate_handler))
         .route("/status", get(status_handler))
@@ -70,6 +71,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 /// Serve the listener HTML page.
 async fn index_handler() -> impl IntoResponse {
     Html(include_str!("../static/index.html"))
+}
+
+/// Serve the favicon.
+async fn favicon_handler() -> impl IntoResponse {
+    (
+        [("content-type", "image/x-icon")],
+        include_bytes!("../icon.ico").as_slice(),
+    )
 }
 
 /// Serve the latency test page.
