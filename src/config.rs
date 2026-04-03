@@ -25,7 +25,7 @@ impl Default for Config {
             audio_sample_rate: 48000,
             audio_channels: 1,
             opus_frame_ms: 5,
-            wasapi_exclusive: true,
+            wasapi_exclusive: false,
         }
     }
 }
