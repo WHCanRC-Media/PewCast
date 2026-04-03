@@ -1,4 +1,5 @@
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
@@ -61,7 +62,7 @@ impl AudioSource for CpalAudioSource {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
         let host = cpal::default_host();
-        let device = if let Some(ref name) = self.device_name {
+        let device = if let Some(ref name) = self.device_name.as_deref().filter(|n| !n.is_empty()) {
             host.input_devices()?
                 .find(|d| d.name().ok().as_deref() == Some(name))
                 .ok_or_else(|| anyhow::anyhow!("Audio device '{}' not found", name))?
@@ -403,6 +404,7 @@ impl AudioSource for MockAudioSource {
 /// Handle for switching audio devices at runtime.
 pub struct DeviceSwitcher {
     switch_tx: mpsc::Sender<String>,
+    exclusive: Arc<AtomicBool>,
 }
 
 impl DeviceSwitcher {
@@ -410,6 +412,17 @@ impl DeviceSwitcher {
     /// and a new one starts — there will be a brief silence gap.
     pub fn switch_device(&self, device_name: String) {
         let _ = self.switch_tx.send(device_name);
+    }
+
+    /// Toggle WASAPI exclusive mode and restart capture on the given device.
+    pub fn set_exclusive(&self, enabled: bool, device_name: String) {
+        self.exclusive.store(enabled, Ordering::Relaxed);
+        let _ = self.switch_tx.send(device_name);
+    }
+
+    /// Check if exclusive mode is currently enabled.
+    pub fn is_exclusive(&self) -> bool {
+        self.exclusive.load(Ordering::Relaxed)
     }
 }
 
@@ -419,10 +432,13 @@ pub fn start_audio_capture_with_switching(
     initial_device: Option<String>,
     sample_rate: u32,
     channels: u16,
+    wasapi_exclusive: bool,
 ) -> (broadcast::Sender<AudioChunk>, DeviceSwitcher) {
     let (tx, _rx) = broadcast::channel(100);
     let tx_clone = tx.clone();
     let (switch_tx, switch_rx) = mpsc::channel::<String>();
+    let exclusive = Arc::new(AtomicBool::new(wasapi_exclusive));
+    let exclusive_loop = exclusive.clone();
 
     std::thread::spawn(move || {
         let mut current_device = initial_device;
@@ -430,14 +446,52 @@ pub fn start_audio_capture_with_switching(
         loop {
             let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
-            let source = CpalAudioSource {
-                device_name: current_device.clone(),
-                stop_rx: Some(stop_rx),
-            };
-
-            // Run capture in a sub-thread so we can stop it
             let capture_tx = tx_clone.clone();
+            let device_for_capture = current_device.clone();
+            let use_exclusive = exclusive_loop.load(Ordering::Relaxed);
+
+            // Run capture in a sub-thread so we can stop it on device switch.
+            // If wasapi_exclusive is set (Windows only), try exclusive mode first;
+            // on failure, fall back to CPAL shared mode.
             let capture_handle = std::thread::spawn(move || {
+                #[cfg(windows)]
+                if use_exclusive {
+                    info!("Attempting WASAPI exclusive mode for lower latency...");
+                    match crate::wasapi_exclusive::start_exclusive_capture(
+                        device_for_capture.as_deref(),
+                        stop_rx,
+                        capture_tx.clone(),
+                        sample_rate,
+                        channels,
+                    ) {
+                        Ok(()) => return, // clean shutdown via stop signal
+                        Err(e) => {
+                            warn!(
+                                "WASAPI exclusive mode failed: {}, falling back to shared mode",
+                                e
+                            );
+                            // stop_rx was consumed; create a new pair so CPAL can be stopped
+                            // when stop_tx is dropped on next device switch
+                            // stop_rx was consumed; CPAL fallback uses None
+                            // (thread::park) — will be stopped when thread is joined
+                            let cpal_source = CpalAudioSource {
+                                device_name: device_for_capture,
+                                stop_rx: None,
+                            };
+                            if let Err(e2) =
+                                cpal_source.start_capture(capture_tx, sample_rate, channels)
+                            {
+                                error!("Audio capture failed: {}", e2);
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                let source = CpalAudioSource {
+                    device_name: device_for_capture,
+                    stop_rx: Some(stop_rx),
+                };
                 if let Err(e) = source.start_capture(capture_tx, sample_rate, channels) {
                     error!("Audio capture failed: {}", e);
                 }
@@ -462,7 +516,13 @@ pub fn start_audio_capture_with_switching(
         }
     });
 
-    (tx, DeviceSwitcher { switch_tx })
+    (
+        tx,
+        DeviceSwitcher {
+            switch_tx,
+            exclusive,
+        },
+    )
 }
 
 /// Start audio capture on a background thread (no device switching).

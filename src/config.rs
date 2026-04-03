@@ -12,6 +12,9 @@ pub struct Config {
     /// Opus frame duration in milliseconds. Valid values: 5, 10, 20, 40, 60.
     /// Lower values reduce latency but increase overhead.
     pub opus_frame_ms: u64,
+    /// Use WASAPI exclusive mode on Windows for lower capture latency.
+    /// Falls back to shared mode if exclusive mode fails.
+    pub wasapi_exclusive: bool,
 }
 
 impl Default for Config {
@@ -22,6 +25,7 @@ impl Default for Config {
             audio_sample_rate: 48000,
             audio_channels: 1,
             opus_frame_ms: 5,
+            wasapi_exclusive: true,
         }
     }
 }
@@ -53,6 +57,9 @@ impl Config {
         }
         if let Ok(val) = std::env::var("WHCANRC_OPUS_FRAME_MS") {
             config.opus_frame_ms = val.parse()?;
+        }
+        if let Ok(val) = std::env::var("WHCANRC_WASAPI_EXCLUSIVE") {
+            config.wasapi_exclusive = val == "1" || val.eq_ignore_ascii_case("true");
         }
 
         Ok(config)

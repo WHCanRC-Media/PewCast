@@ -12,9 +12,10 @@ pub fn spawn_tray(
     switcher: Option<DeviceSwitcher>,
     url: String,
     log_path: PathBuf,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
 ) {
     std::thread::spawn(move || {
-        if let Err(e) = run_tray(current_device, switcher, url, log_path) {
+        if let Err(e) = run_tray(current_device, switcher, url, log_path, shutdown_tx) {
             error!("System tray error: {}", e);
         }
     });
@@ -25,6 +26,7 @@ fn run_tray(
     switcher: Option<DeviceSwitcher>,
     url: String,
     log_path: PathBuf,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
 ) -> anyhow::Result<()> {
     use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
     use tray_icon::TrayIconBuilder;
@@ -39,6 +41,16 @@ fn run_tray(
     let devices = list_input_devices();
 
     let device_items = build_device_menu(&devices_submenu, &devices, &current_device)?;
+
+    // Add exclusive mode toggle to the device submenu
+    devices_submenu.append(&muda::PredefinedMenuItem::separator())?;
+    let is_exclusive = switcher.as_ref().is_some_and(|s| s.is_exclusive());
+    let exclusive_item = muda::MenuItem::new(
+        format_exclusive_label(is_exclusive),
+        switcher.is_some(),
+        None,
+    );
+    devices_submenu.append(&exclusive_item)?;
 
     menu.append(&devices_submenu)?;
     menu.append(&PredefinedMenuItem::separator())?;
@@ -91,8 +103,9 @@ fn run_tray(
 
         if let Ok(event) = menu_rx.try_recv() {
             if event.id() == quit_item.id() {
-                info!("Quit requested from tray");
-                std::process::exit(0);
+                info!("Quit requested from tray, initiating graceful shutdown...");
+                let _ = shutdown_tx.send(true);
+                break;
             }
 
             if event.id() == qr_item.id() {
@@ -105,6 +118,31 @@ fn run_tray(
 
             if event.id() == log_item.id() {
                 show_log(&log_path);
+            }
+
+            if event.id() == exclusive_item.id() {
+                if let Some(ref switcher) = switcher {
+                    let new_exclusive = !switcher.is_exclusive();
+                    // Resolve current device: use explicitly selected name, or
+                    // fall back to the system default input device.
+                    let device = current_device
+                        .clone()
+                        .or_else(|| {
+                            list_input_devices()
+                                .into_iter()
+                                .find(|(_, is_default)| *is_default)
+                                .map(|(name, _)| name)
+                        })
+                        .unwrap_or_default();
+                    info!(
+                        "Toggling WASAPI exclusive mode: {} (device: {})",
+                        if new_exclusive { "ON" } else { "OFF" },
+                        device
+                    );
+                    switcher.set_exclusive(new_exclusive, device.clone());
+                    current_device = Some(device);
+                    exclusive_item.set_text(format_exclusive_label(new_exclusive));
+                }
             }
 
             for (item, device_name) in &device_items {
@@ -124,6 +162,8 @@ fn run_tray(
 
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+
+    Ok(())
 }
 
 fn build_device_menu(
@@ -157,6 +197,14 @@ fn update_device_labels(
             None => is_default,
         };
         item.set_text(format_device_label(name, is_active, is_default));
+    }
+}
+
+fn format_exclusive_label(is_exclusive: bool) -> String {
+    if is_exclusive {
+        "Mode: Exclusive (low latency)".to_string()
+    } else {
+        "Mode: Shared".to_string()
     }
 }
 

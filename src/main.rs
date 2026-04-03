@@ -6,6 +6,8 @@ mod latency_test;
 mod qos;
 mod server;
 mod tray;
+#[cfg(windows)]
+mod wasapi_exclusive;
 mod webrtc;
 mod webtransport;
 
@@ -105,6 +107,9 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "localhost".to_string());
     let url = format!("https://{}:{}", lan_ip, config.port);
 
+    // Create shutdown signal channel (shared with tray quit + Ctrl+C handler)
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
     // Start audio capture (real mic or test tone)
     let audio_tx = if cli.test_tone {
         info!("Using test tone (440Hz sine wave) instead of audio input");
@@ -114,13 +119,20 @@ async fn main() -> anyhow::Result<()> {
             config.audio_channels,
         );
         // Launch tray without device switching
-        tray::spawn_tray(cli.device.clone(), None, url.clone(), log_path.clone());
+        tray::spawn_tray(
+            cli.device.clone(),
+            None,
+            url.clone(),
+            log_path.clone(),
+            shutdown_tx.clone(),
+        );
         tx
     } else {
         let (tx, switcher) = start_audio_capture_with_switching(
             cli.device.clone(),
             config.audio_sample_rate,
             config.audio_channels,
+            config.wasapi_exclusive,
         );
         // Launch tray with device switching
         tray::spawn_tray(
@@ -128,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
             Some(switcher),
             url.clone(),
             log_path.clone(),
+            shutdown_tx.clone(),
         );
         tx
     };
@@ -172,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
         last_peer: Mutex::new(None),
         webtransport_port,
         webtransport_state: Arc::clone(&wt_state),
+        config: config.clone(),
     });
 
     let app = build_router(app_state);
@@ -183,9 +197,6 @@ async fn main() -> anyhow::Result<()> {
         rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "0.0.0.0".to_string()])?;
     let cert_pem = cert.cert.pem();
     let key_pem = cert.key_pair.serialize_pem();
-
-    // Create shutdown signal channel
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Start WebTransport server on a separate port
     let wt_server = WebTransportServer::new(webtransport_port, Arc::clone(&wt_state));
@@ -218,13 +229,15 @@ async fn main() -> anyhow::Result<()> {
     let handle = axum_server::Handle::new();
     let shutdown_handle = handle.clone();
 
-    // Spawn shutdown signal handler
+    // Spawn shutdown signal handler (Ctrl+C or tray quit)
+    let mut tray_shutdown_rx = shutdown_rx.clone();
     tokio::spawn(async move {
-        shutdown_signal().await;
+        tokio::select! {
+            _ = shutdown_signal() => {},
+            _ = async { while tray_shutdown_rx.changed().await.is_ok() { if *tray_shutdown_rx.borrow() { break; } } } => {},
+        }
         info!("Shutdown signal received, stopping servers...");
-        // Signal WebTransport server to stop
         let _ = shutdown_tx.send(true);
-        // Gracefully shutdown HTTP server
         shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
     });
 

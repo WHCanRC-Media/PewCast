@@ -124,53 +124,7 @@ async fn handle_session_inner(
 
     info!("WebTransport session established (path: {})", path);
 
-    match path.as_str() {
-        "/ping" => echo_datagrams(connection).await,
-        _ => stream_audio_datagrams(connection, audio_rx).await,
-    }
-}
-
-/// Echo datagrams back to the client for RTT measurement.
-/// Datagram format: [seq(4) | last_rtt_us(4)]
-async fn echo_datagrams(connection: wtransport::Connection) -> anyhow::Result<()> {
-    let mut count: u64 = 0;
-    let start = std::time::Instant::now();
-    loop {
-        match connection.receive_datagram().await {
-            Ok(datagram) => {
-                let payload: &[u8] = &datagram;
-
-                // Parse RTT reported by client (from previous ping)
-                if payload.len() >= 8 {
-                    let seq = u32::from_le_bytes(payload[0..4].try_into().unwrap());
-                    let rtt_us = u32::from_le_bytes(payload[4..8].try_into().unwrap());
-                    if rtt_us > 0 {
-                        let rtt_ms = rtt_us as f64 / 1000.0;
-                        if count.is_multiple_of(20) {
-                            let elapsed = start.elapsed();
-                            info!(
-                                "Ping seq={}: RTT={:.1}ms ({} echoed, {:.1}s elapsed)",
-                                seq,
-                                rtt_ms,
-                                count,
-                                elapsed.as_secs_f64()
-                            );
-                        }
-                    }
-                }
-
-                if let Err(e) = connection.send_datagram(payload) {
-                    info!("Ping connection closed: {} ({} pings echoed)", e, count);
-                    return Ok(());
-                }
-                count += 1;
-            }
-            Err(e) => {
-                info!("Ping connection closed: {} ({} pings echoed)", e, count);
-                return Ok(());
-            }
-        }
-    }
+    stream_audio_datagrams(connection, audio_rx).await
 }
 
 /// Datagram header format (8 bytes):
@@ -183,8 +137,16 @@ const HEADER_SIZE: usize = 8;
 /// well within the QUIC datagram MTU (~1200 bytes).
 const MAX_SAMPLES_PER_DATAGRAM: usize = 240;
 
+/// Size of a ping probe datagram: [seq(4) | last_rtt_us(4)].
+/// Audio datagrams are always larger (header + PCM), so we can distinguish
+/// ping probes by their exact 8-byte length.
+const PING_PROBE_SIZE: usize = 8;
+
 /// Stream raw PCM i16 audio as WebTransport datagrams with header.
 /// Fragments large audio chunks into multiple datagrams that fit within the MTU.
+///
+/// Also echoes back any 8-byte ping probes from the client for RTT measurement
+/// on the same connection used for audio.
 async fn stream_audio_datagrams(
     connection: wtransport::Connection,
     mut audio_rx: broadcast::Receiver<AudioChunk>,
@@ -192,6 +154,39 @@ async fn stream_audio_datagrams(
     let mut send_count: u64 = 0;
     let mut seq: u32 = 0;
     let mut sample_offset: u32 = 0;
+
+    // Spawn a task to echo ping probes from the client back.
+    let ping_conn = connection.clone();
+    let ping_task = tokio::spawn(async move {
+        let mut count: u64 = 0;
+        let start = std::time::Instant::now();
+        while let Ok(datagram) = ping_conn.receive_datagram().await {
+            let payload: &[u8] = &datagram;
+            if payload.len() == PING_PROBE_SIZE {
+                // Log periodically
+                if count.is_multiple_of(20) {
+                    if let Ok(rtt_bytes) = payload[4..8].try_into() {
+                        let rtt_us = u32::from_le_bytes(rtt_bytes);
+                        if rtt_us > 0 {
+                            let rtt_ms = rtt_us as f64 / 1000.0;
+                            let elapsed = start.elapsed();
+                            info!(
+                                "Audio-session ping seq={}: RTT={:.1}ms ({} echoed, {:.1}s elapsed)",
+                                u32::from_le_bytes(payload[0..4].try_into().unwrap()),
+                                rtt_ms, count, elapsed.as_secs_f64()
+                            );
+                        }
+                    }
+                }
+                if let Err(e) = ping_conn.send_datagram(payload) {
+                    info!("Audio-session ping echo stopped: {}", e);
+                    break;
+                }
+                count += 1;
+            }
+            // Non-ping datagrams are ignored (clients shouldn't send audio)
+        }
+    });
 
     loop {
         match audio_rx.recv().await {
@@ -219,6 +214,7 @@ async fn stream_audio_datagrams(
                     // Send as datagram (unreliable, minimum latency)
                     if let Err(e) = connection.send_datagram(&datagram) {
                         info!("WebTransport connection closed: {}", e);
+                        ping_task.abort();
                         return Ok(());
                     }
 
@@ -244,5 +240,6 @@ async fn stream_audio_datagrams(
         }
     }
 
+    ping_task.abort();
     Ok(())
 }

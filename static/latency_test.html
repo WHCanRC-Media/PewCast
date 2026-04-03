@@ -113,21 +113,34 @@
   Place phone speaker near the microphone. Click Test to play a chirp and measure how long until it returns through the server.
 </p>
 
-<div class="results" id="ping-results" style="display: none; margin-top: 24px;">
-  <h2>WebTransport Ping</h2>
-  <div class="latency-value" id="ping-value">—</div>
-  <div class="stats" id="ping-stats"></div>
-  <div style="margin-top: 10px;">
-    <button id="ping-btn" onclick="togglePing()" style="
-      padding: 8px 20px; border-radius: 20px; border: 2px solid #9c27b0;
-      background: rgba(156,39,176,0.15); color: #ce93d8;
-      font-size: 0.85rem; cursor: pointer; outline: none;
-    ">Start Ping</button>
-  </div>
-  <div class="history" id="ping-history"></div>
+<div class="results" id="audio-rtt-results" style="display: none; margin-top: 24px;">
+  <h2>Audio Session RTT</h2>
+  <div class="latency-value" id="audio-rtt-value">—</div>
+  <div class="stats" id="audio-rtt-stats"></div>
+  <div class="history" id="audio-rtt-history"></div>
+</div>
+
+<div class="results" id="diagnostics" style="display: none; margin-top: 24px; text-align: left;">
+  <h2 style="text-align: center;">Diagnostics</h2>
+  <div id="diag-content" style="font-size: 0.8rem; line-height: 1.6;"></div>
+</div>
+
+<div class="results" id="server-info" style="display: none; margin-top: 24px; text-align: left;">
+  <h2 style="text-align: center;">Server Config</h2>
+  <div id="server-info-content" style="font-size: 0.8rem; line-height: 1.6;"></div>
+</div>
+
+<div class="results" id="budget-estimate" style="display: none; margin-top: 24px; text-align: left;">
+  <h2 style="text-align: center;">Latency Budget Estimate</h2>
+  <div id="budget-content" style="font-size: 0.8rem; line-height: 1.6; font-family: monospace;"></div>
 </div>
 
 <div class="debug" id="debug" style="margin-top: 16px; font-family: monospace; font-size: 0.7rem; color: #555;"></div>
+
+<div style="margin-top: 16px; text-align: center;">
+  <button id="report-btn" style="background: rgba(74,144,217,0.15); border: 1px solid #4a90d9; color: #4a90d9; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.85rem;" onclick="sendReport()" disabled>Send Report to Server</button>
+  <span id="report-status" style="font-size: 0.75rem; color: #888; margin-left: 8px;"></span>
+</div>
 
 <div class="nav">
   <a href="/">← Back to Listen</a>
@@ -146,6 +159,13 @@ let webtransportPort = null;
 let chirpSentTime = 0;
 let latencyHistory = [];
 let detectorWorklet = null;
+
+// Audio-session RTT probe state
+let audioRttInterval = null;
+let audioRttHistory = [];
+let audioRttPending = new Map(); // seq -> sentTime
+let audioRttSeq = 0;
+let audioRttLastUs = 0;
 
 // Chirp parameters (must match generation)
 const CHIRP_FREQ_START = 1000;
@@ -343,14 +363,27 @@ async function connectWebTransport() {
     }
   };
 
-  // Read datagrams, strip 8-byte header, and send PCM to detector worklet
+  // Read datagrams: audio (>8 bytes) goes to detector, ping echoes (==8 bytes) to RTT tracker
   const reader = wt.datagrams.readable.getReader();
   (async () => {
     try {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        if (value.byteLength < 8) continue; // malformed
+        if (value.byteLength === 8) {
+          // Echoed ping probe: [seq(4) | last_rtt_us(4)]
+          const dv = new DataView(value.buffer, value.byteOffset);
+          const seq = dv.getUint32(0, true);
+          const sent = audioRttPending.get(seq);
+          if (sent !== undefined) {
+            audioRttPending.delete(seq);
+            const rtt = performance.now() - sent;
+            audioRttLastUs = Math.round(rtt * 1000);
+            onAudioRttResult(rtt);
+          }
+          continue;
+        }
+        if (value.byteLength < 9) continue; // malformed audio datagram
         // Strip 8-byte header (seq + timestamp), send PCM payload
         const pcmBytes = value.slice(8);
         detectorWorklet.port.postMessage(pcmBytes, [pcmBytes.buffer]);
@@ -364,6 +397,9 @@ async function connectWebTransport() {
       }
     }
   })();
+
+  // Start sending ping probes on the audio connection every 50ms
+  startAudioRttProbes();
 
   wt.closed.then(() => {
     console.log('WebTransport closed');
@@ -379,6 +415,8 @@ async function connectWebTransport() {
   setStatus('Connected', 'live');
   testBtn.disabled = false;
   isConnected = true;
+  startDiagnostics();
+  startAutoReport();
 }
 
 function createPcmDetectorWorkletCode() {
@@ -487,6 +525,8 @@ async function connectWebRTC() {
 
     setStatus('Connected', 'live');
     testBtn.disabled = false;
+    startDiagnostics();
+    startAutoReport();
   };
 
   pc.oniceconnectionstatechange = () => {
@@ -520,6 +560,9 @@ function disconnect() {
   isConnected = false;
   isMeasuring = false;
   stopRepeat();
+  stopAudioRttProbes();
+  stopDiagnostics();
+  stopAutoReport();
   connectBtn.textContent = 'Connect';
   connectBtn.className = 'btn';
   testBtn.disabled = true;
@@ -689,145 +732,320 @@ testBtn.addEventListener('mouseup', onTestUp);
 testBtn.addEventListener('touchstart', (e) => { e.preventDefault(); onTestDown(); });
 testBtn.addEventListener('touchend', (e) => { e.preventDefault(); onTestUp(); });
 
-// --- WebTransport Ping Test ---
-let pingWt = null;
-let pingRunning = false;
-let pingInterval = null;
-let pingHistory = [];
-let pendingPings = new Map(); // seq -> sentTime
+// --- Audio Session RTT Probes ---
+const audioRttResultsEl = document.getElementById('audio-rtt-results');
+const audioRttValueEl = document.getElementById('audio-rtt-value');
+const audioRttStatsEl = document.getElementById('audio-rtt-stats');
+const audioRttHistoryEl = document.getElementById('audio-rtt-history');
 
-const pingBtn = document.getElementById('ping-btn');
-const pingResultsEl = document.getElementById('ping-results');
-const pingValueEl = document.getElementById('ping-value');
-const pingStatsEl = document.getElementById('ping-stats');
-const pingHistoryEl = document.getElementById('ping-history');
+function startAudioRttProbes() {
+  stopAudioRttProbes();
+  audioRttHistory = [];
+  audioRttPending.clear();
+  audioRttSeq = 0;
+  audioRttLastUs = 0;
+  audioRttResultsEl.style.display = 'block';
 
-// Show ping section once we know WebTransport port is available
-function showPingIfAvailable() {
-  if (typeof WebTransport !== 'undefined' && webtransportPort) {
-    pingResultsEl.style.display = 'block';
-  }
+  const writer = wt.datagrams.writable.getWriter();
+  audioRttInterval = setInterval(() => {
+    if (!wt) return;
+    // Send 8-byte ping probe: [seq(4) | last_rtt_us(4)]
+    const buf = new Uint8Array(8);
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(0, audioRttSeq, true);
+    dv.setUint32(4, audioRttLastUs, true);
+    audioRttPending.set(audioRttSeq, performance.now());
+    writer.write(buf).catch(() => {});
+    audioRttSeq++;
+    // Expire old pending probes
+    const now = performance.now();
+    for (const [s, t] of audioRttPending) {
+      if (now - t > 2000) audioRttPending.delete(s);
+    }
+  }, 50);
 }
 
-async function togglePing() {
-  if (pingRunning) {
-    stopPing();
-  } else {
-    await startPing();
-  }
+function stopAudioRttProbes() {
+  if (audioRttInterval) { clearInterval(audioRttInterval); audioRttInterval = null; }
+  audioRttPending.clear();
 }
 
-async function startPing() {
-  if (pingRunning) return;
-
-  pingBtn.textContent = 'Stop Ping';
-  pingHistory = [];
-  pendingPings.clear();
-
-  try {
-    const host = window.location.hostname;
-    const url = `https://${host}:${webtransportPort}/ping`;
-
-    const info = await fetch('/transport-info').then(r => r.json());
-    if (!info.cert_hash) throw new Error('No cert hash');
-
-    const hashBytes = Uint8Array.from(atob(info.cert_hash), c => c.charCodeAt(0));
-    pingWt = new WebTransport(url, {
-      serverCertificateHashes: [{ algorithm: 'sha-256', value: hashBytes.buffer }]
-    });
-    await pingWt.ready;
-
-    pingRunning = true;
-
-    // Read echoed datagrams
-    const reader = pingWt.datagrams.readable.getReader();
-    (async () => {
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (value.byteLength < 4) continue;
-          if (value.byteLength < 8) continue;
-          const dv = new DataView(value.buffer, value.byteOffset);
-          const seq = dv.getUint32(0, true);
-          const sent = pendingPings.get(seq);
-          if (sent !== undefined) {
-            pendingPings.delete(seq);
-            const rtt = performance.now() - sent;
-            lastRttUs = Math.round(rtt * 1000); // ms -> us
-            onPingResult(rtt);
-          }
-        }
-      } catch (e) {
-        if (pingRunning) console.warn('Ping read error:', e);
-      }
-    })();
-
-    pingWt.closed.then(() => { if (pingRunning) stopPing(); }).catch(() => {});
-
-    // Send pings every 50ms (fast enough to keep WiFi radio awake)
-    let seq = 0;
-    let lastRttUs = 0;
-    const writer = pingWt.datagrams.writable.getWriter();
-    pingInterval = setInterval(() => {
-      if (!pingRunning || !pingWt) return;
-      // [seq(4) | last_rtt_us(4)] - 8 bytes
-      const buf = new Uint8Array(8);
-      const dv = new DataView(buf.buffer);
-      dv.setUint32(0, seq, true);
-      dv.setUint32(4, lastRttUs, true);
-      pendingPings.set(seq, performance.now());
-      writer.write(buf).catch(() => {});
-      seq++;
-      // Expire old pending pings (>2s)
-      const now = performance.now();
-      for (const [s, t] of pendingPings) {
-        if (now - t > 2000) pendingPings.delete(s);
-      }
-    }, 50);
-
-  } catch (e) {
-    console.error('Ping connect error:', e);
-    pingValueEl.textContent = 'Error';
-    pingBtn.textContent = 'Start Ping';
-  }
-}
-
-function stopPing() {
-  pingRunning = false;
-  if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
-  if (pingWt) { pingWt.close(); pingWt = null; }
-  pingBtn.textContent = 'Start Ping';
-}
-
-function onPingResult(rttMs) {
-  pingHistory.push(rttMs);
-  if (pingHistory.length > 50) pingHistory.shift();
+function onAudioRttResult(rttMs) {
+  audioRttHistory.push(rttMs);
+  if (audioRttHistory.length > 50) audioRttHistory.shift();
 
   const latencyClass = rttMs > 100 ? 'bad' : rttMs > 50 ? 'warn' : '';
-  pingValueEl.textContent = rttMs.toFixed(1) + ' ms';
-  pingValueEl.className = 'latency-value ' + latencyClass;
+  audioRttValueEl.textContent = rttMs.toFixed(1) + ' ms';
+  audioRttValueEl.className = 'latency-value ' + latencyClass;
 
-  if (pingHistory.length > 1) {
-    const sorted = [...pingHistory].sort((a, b) => a - b);
+  if (audioRttHistory.length > 1) {
+    const sorted = [...audioRttHistory].sort((a, b) => a - b);
     const min = sorted[0].toFixed(1);
     const max = sorted[sorted.length - 1].toFixed(1);
     const avg = (sorted.reduce((a, b) => a + b, 0) / sorted.length).toFixed(1);
-    pingStatsEl.textContent = `min: ${min}ms | avg: ${avg}ms | max: ${max}ms (n=${sorted.length})`;
+    audioRttStatsEl.textContent = `min: ${min}ms | avg: ${avg}ms | max: ${max}ms (n=${sorted.length})`;
   }
 
-  const items = pingHistory.slice(-10).map(l => l.toFixed(1) + 'ms').join(' → ');
-  pingHistoryEl.textContent = items;
+  const items = audioRttHistory.slice(-10).map(l => l.toFixed(1) + 'ms').join(' \u2192 ');
+  audioRttHistoryEl.textContent = items;
 }
 
-// Hook into the connect flow to show ping section
-const origConnect = connect;
-connect = async function() {
-  await origConnect();
-  showPingIfAvailable();
-};
-// Also show immediately if port is already known
-if (webtransportPort) showPingIfAvailable();
+// --- Diagnostics Collection & Reporting ---
+
+let serverInfo = null;
+let diagInterval = null;
+let webrtcStatsCache = {};
+
+async function fetchServerInfo() {
+  try {
+    const resp = await fetch('/latency_test/server-info');
+    serverInfo = await resp.json();
+    const el = document.getElementById('server-info');
+    el.style.display = 'block';
+    document.getElementById('server-info-content').innerHTML = [
+      `<b>Capture mode:</b> ${serverInfo.capture_mode}`,
+      `<b>Sample rate:</b> ${serverInfo.sample_rate}Hz`,
+      `<b>Channels:</b> ${serverInfo.channels}`,
+      `<b>Opus frame:</b> ${serverInfo.opus_frame_ms}ms`,
+      `<b>Capture buffer:</b> ${serverInfo.capture_buffer_samples} samples (${serverInfo.capture_buffer_ms.toFixed(1)}ms)`,
+      `<b>Active peers:</b> ${serverInfo.active_peers}`,
+    ].join('<br>');
+  } catch (e) {
+    console.warn('Failed to fetch server info:', e);
+  }
+}
+
+function collectDiagnostics() {
+  const diag = {};
+
+  // AudioContext stats
+  if (audioCtx) {
+    diag.outputLatencyMs = typeof audioCtx.outputLatency === 'number'
+      ? (audioCtx.outputLatency * 1000) : null;
+    diag.baseLatencyMs = typeof audioCtx.baseLatency === 'number'
+      ? (audioCtx.baseLatency * 1000) : null;
+    diag.sampleRate = audioCtx.sampleRate;
+    diag.state = audioCtx.state;
+  }
+
+  diag.transport = transportMode;
+  diag.userAgent = navigator.userAgent;
+
+  // WebRTC stats
+  diag.webrtc = webrtcStatsCache;
+
+  return diag;
+}
+
+async function pollWebRTCStats() {
+  if (!pc) return;
+  try {
+    const stats = await pc.getStats();
+    stats.forEach(report => {
+      if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+        const jbEmitted = report.jitterBufferEmittedCount || 0;
+        webrtcStatsCache = {
+          jitterBufferDelayMs: jbEmitted > 0
+            ? (report.jitterBufferDelay / jbEmitted) * 1000 : null,
+          jitterBufferTargetMs: typeof report.jitterBufferTargetDelay === 'number'
+            ? report.jitterBufferTargetDelay * 1000 : null,
+          jitterBufferMinDelayMs: typeof report.jitterBufferMinimumDelay === 'number'
+            ? report.jitterBufferMinimumDelay * 1000 : null,
+          jitter: report.jitter,
+          packetsReceived: report.packetsReceived,
+          packetsLost: report.packetsLost,
+        };
+      }
+    });
+  } catch (e) {
+    // ignore
+  }
+}
+
+function updateDiagnosticsPanel() {
+  const diag = collectDiagnostics();
+  const el = document.getElementById('diagnostics');
+  el.style.display = 'block';
+
+  const lines = [];
+  lines.push(`<b>Transport:</b> ${diag.transport || '—'}`);
+  lines.push(`<b>AudioContext state:</b> ${diag.state || '—'}`);
+  lines.push(`<b>AudioContext.sampleRate:</b> ${diag.sampleRate || '—'}Hz`);
+
+  if (diag.outputLatencyMs !== null && diag.outputLatencyMs !== undefined) {
+    lines.push(`<b>outputLatency:</b> ${diag.outputLatencyMs.toFixed(1)}ms <span style="color:#666">(speaker playout)</span>`);
+  } else {
+    lines.push(`<b>outputLatency:</b> <span style="color:#f44336">not supported</span>`);
+  }
+  if (diag.baseLatencyMs !== null && diag.baseLatencyMs !== undefined) {
+    lines.push(`<b>baseLatency:</b> ${diag.baseLatencyMs.toFixed(1)}ms <span style="color:#666">(audio graph processing)</span>`);
+  }
+
+  if (diag.transport === 'webrtc' && diag.webrtc) {
+    const w = diag.webrtc;
+    if (w.jitterBufferDelayMs != null) {
+      lines.push(`<b>Jitter buffer delay:</b> ${w.jitterBufferDelayMs.toFixed(1)}ms`);
+    }
+    if (w.jitterBufferTargetMs != null) {
+      lines.push(`<b>Jitter buffer target:</b> ${w.jitterBufferTargetMs.toFixed(1)}ms`);
+    }
+    if (w.jitterBufferMinDelayMs != null) {
+      lines.push(`<b>Jitter buffer min:</b> ${w.jitterBufferMinDelayMs.toFixed(1)}ms`);
+    }
+    if (w.jitter != null) {
+      lines.push(`<b>Jitter:</b> ${(w.jitter * 1000).toFixed(1)}ms`);
+    }
+    if (w.packetsReceived != null) {
+      const lossRate = w.packetsLost > 0
+        ? ((w.packetsLost / (w.packetsReceived + w.packetsLost)) * 100).toFixed(2) + '%'
+        : '0%';
+      lines.push(`<b>Packets:</b> ${w.packetsReceived} received, ${w.packetsLost || 0} lost (${lossRate})`);
+    }
+  }
+
+  document.getElementById('diag-content').innerHTML = lines.join('<br>');
+
+  // Update latency budget estimate
+  updateBudgetEstimate(diag);
+}
+
+function updateBudgetEstimate(diag) {
+  if (!serverInfo) return;
+  if (latencyHistory.length === 0 && audioRttHistory.length === 0) return;
+
+  const el = document.getElementById('budget-estimate');
+  el.style.display = 'block';
+
+  const lines = [];
+
+  // Capture latency
+  const capMs = serverInfo.capture_buffer_ms;
+  const capExtra = serverInfo.capture_mode === 'shared' ? 10 : 0; // Windows Audio Engine
+  lines.push(`Capture:        ${(capMs + capExtra).toFixed(1)}ms  (${serverInfo.capture_mode}, ${serverInfo.capture_buffer_samples} samples${capExtra ? ' + ~10ms mixing' : ''})`);
+
+  // Encode
+  lines.push(`Encode:         ${serverInfo.opus_frame_ms}ms  (Opus frame)`);
+
+  // Network (from audio RTT probes)
+  let networkOneWay = '~8';
+  if (audioRttHistory.length > 0) {
+    const sorted = [...audioRttHistory].sort((a, b) => a - b);
+    const p50 = sorted[Math.floor(sorted.length / 2)];
+    networkOneWay = (p50 / 2).toFixed(1);
+  }
+  lines.push(`Network:        ${networkOneWay}ms  (one-way, from RTT probes)`);
+
+  // Decode
+  lines.push(`Decode:         ${serverInfo.opus_frame_ms}ms  (Opus frame)`);
+
+  // Jitter buffer
+  let jitterMs = '~30';
+  if (diag.transport === 'webrtc' && diag.webrtc && diag.webrtc.jitterBufferDelayMs != null) {
+    jitterMs = diag.webrtc.jitterBufferDelayMs.toFixed(1);
+  } else if (diag.transport === 'webtransport') {
+    jitterMs = '30';  // default WT jitter buffer
+  }
+  lines.push(`Jitter buffer:  ${jitterMs}ms  (${diag.transport})`);
+
+  // Playout
+  let playoutMs = '~20-40';
+  if (diag.outputLatencyMs != null) {
+    playoutMs = diag.outputLatencyMs.toFixed(1);
+  }
+  lines.push(`Playout:        ${playoutMs}ms  (AudioContext.outputLatency)`);
+
+  // Total estimate
+  const nums = [
+    capMs + capExtra,
+    serverInfo.opus_frame_ms,
+    parseFloat(networkOneWay),
+    serverInfo.opus_frame_ms,
+    parseFloat(jitterMs) || 30,
+    diag.outputLatencyMs || 30,
+  ];
+  const total = nums.reduce((a, b) => a + b, 0);
+  lines.push(`─────────────────────`);
+  lines.push(`<b>Estimated:      ${total.toFixed(0)}ms  (one-way total)</b>`);
+
+  // Compare with measured chirp RTT
+  if (latencyHistory.length > 0) {
+    const sorted = [...latencyHistory].sort((a, b) => a - b);
+    const p50 = sorted[Math.floor(sorted.length / 2)];
+    // Chirp RTT = speaker→mic→server→client, roughly: one-way + network + playout (extra speaker→mic path)
+    lines.push(`<b>Measured chirp: ${p50.toFixed(0)}ms  (round-trip p50)</b>`);
+  }
+
+  document.getElementById('budget-content').innerHTML = lines.join('\n').replace(/\n/g, '<br>');
+}
+
+function startDiagnostics() {
+  fetchServerInfo();
+  document.getElementById('report-btn').disabled = false;
+  // Poll diagnostics panel and WebRTC stats every second
+  diagInterval = setInterval(() => {
+    if (transportMode === 'webrtc') pollWebRTCStats();
+    updateDiagnosticsPanel();
+  }, 1000);
+}
+
+function stopDiagnostics() {
+  if (diagInterval) { clearInterval(diagInterval); diagInterval = null; }
+  webrtcStatsCache = {};
+}
+
+async function sendReport() {
+  const diag = collectDiagnostics();
+  const report = {
+    transport: diag.transport || 'unknown',
+    user_agent: diag.userAgent,
+    output_latency_ms: diag.outputLatencyMs,
+    base_latency_ms: diag.baseLatencyMs,
+    audio_ctx_sample_rate: diag.sampleRate,
+    chirp_rtt: latencyHistory.length > 0 ? [...latencyHistory] : null,
+    audio_rtt: audioRttHistory.length > 0 ? [...audioRttHistory] : null,
+    jitter_buffer_delay_ms: diag.webrtc?.jitterBufferDelayMs || null,
+    jitter_buffer_target_ms: diag.webrtc?.jitterBufferTargetMs || null,
+    jitter_buffer_min_delay_ms: diag.webrtc?.jitterBufferMinDelayMs || null,
+    packets_received: diag.webrtc?.packetsReceived || null,
+    packets_lost: diag.webrtc?.packetsLost || null,
+    jitter: diag.webrtc?.jitter || null,
+  };
+
+  const statusEl = document.getElementById('report-status');
+  try {
+    const resp = await fetch('/latency_test/report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(report),
+    });
+    if (resp.ok) {
+      statusEl.textContent = 'Sent ✓';
+      statusEl.style.color = '#4caf50';
+    } else {
+      statusEl.textContent = 'Error: ' + resp.status;
+      statusEl.style.color = '#f44336';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Failed: ' + e.message;
+    statusEl.style.color = '#f44336';
+  }
+  setTimeout(() => { statusEl.textContent = ''; }, 3000);
+}
+
+// Auto-report every 10 seconds while connected
+let autoReportInterval = null;
+function startAutoReport() {
+  stopAutoReport();
+  autoReportInterval = setInterval(() => {
+    if (isConnected && (latencyHistory.length > 0 || audioRttHistory.length > 0)) {
+      sendReport();
+    }
+  }, 10000);
+}
+function stopAutoReport() {
+  if (autoReportInterval) { clearInterval(autoReportInterval); autoReportInterval = null; }
+}
+
 </script>
 </body>
 </html>
