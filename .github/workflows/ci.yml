@@ -70,7 +70,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: linux-x86_64
+          name: whcanrc-assisted-listening-linux-x86_64
           path: |
             whcanrc-assisted-listening-linux-x86_64
             whcanrc-assisted-listening-linux-x86_64.tar.gz
@@ -91,5 +91,5 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-x86_64
+          name: whcanrc-assisted-listening-windows-x86_64
           path: whcanrc-assisted-listening-windows-x86_64.exe
