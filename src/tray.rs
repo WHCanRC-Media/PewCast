@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use tracing::{error, info};
 
 use crate::audio::{list_input_devices, DeviceSwitcher};
+use crate::config::UserPrefs;
 
 /// Spawn the system tray icon on a dedicated OS thread.
 /// If a DeviceSwitcher is provided, selecting a device switches live.
@@ -142,6 +143,7 @@ fn run_tray(
                     switcher.set_exclusive(new_exclusive, device.clone());
                     current_device = Some(device);
                     exclusive_item.set_text(format_exclusive_label(new_exclusive));
+                    save_prefs(&current_device, new_exclusive);
                 }
             }
 
@@ -151,6 +153,7 @@ fn run_tray(
                         info!("Switching to device: {}", device_name);
                         switcher.switch_device(device_name.clone());
                         current_device = Some(device_name.clone());
+                        save_prefs(&current_device, switcher.is_exclusive());
 
                         // Update menu labels to reflect new selection
                         let devices = list_input_devices();
@@ -198,6 +201,14 @@ fn update_device_labels(
         };
         item.set_text(format_device_label(name, is_active, is_default));
     }
+}
+
+fn save_prefs(device: &Option<String>, wasapi_exclusive: bool) {
+    let prefs = UserPrefs {
+        device: device.clone(),
+        wasapi_exclusive: Some(wasapi_exclusive),
+    };
+    prefs.save();
 }
 
 fn format_exclusive_label(is_exclusive: bool) -> String {

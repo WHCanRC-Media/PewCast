@@ -19,8 +19,10 @@ use clap::Parser;
 use tokio::sync::{watch, Mutex};
 use tracing::{error, info};
 
-use audio::{start_audio_capture, start_audio_capture_with_switching, ToneAudioSource};
-use config::Config;
+use audio::{
+    list_input_devices, start_audio_capture, start_audio_capture_with_switching, ToneAudioSource,
+};
+use config::{Config, UserPrefs};
 use server::{build_router, AppState};
 use webrtc::{audio_to_track_writer, PeerManager};
 use webtransport::{WebTransportServer, WebTransportState};
@@ -93,6 +95,31 @@ async fn main() -> anyhow::Result<()> {
         config.port, config.audio_sample_rate, config.audio_channels
     );
 
+    // Load user preferences (saved device + exclusive mode).
+    // CLI flags override prefs; prefs override config.toml defaults.
+    let prefs = UserPrefs::load();
+
+    let initial_device = if cli.device.is_some() {
+        cli.device.clone()
+    } else if let Some(ref saved) = prefs.device {
+        // Verify the saved device still exists; drop it if not.
+        let devices = list_input_devices();
+        if devices.iter().any(|(name, _)| name == saved) {
+            info!("Using saved device: {}", saved);
+            Some(saved.clone())
+        } else {
+            info!(
+                "Saved device \"{}\" no longer available, falling back to default",
+                saved
+            );
+            None
+        }
+    } else {
+        None
+    };
+
+    let wasapi_exclusive = prefs.wasapi_exclusive.unwrap_or(config.wasapi_exclusive);
+
     // Initialize WebRTC peer manager
     let peer_manager = PeerManager::new()?;
     let audio_track = Arc::clone(peer_manager.audio_track());
@@ -120,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
         );
         // Launch tray without device switching
         tray::spawn_tray(
-            cli.device.clone(),
+            initial_device.clone(),
             None,
             url.clone(),
             log_path.clone(),
@@ -129,14 +156,14 @@ async fn main() -> anyhow::Result<()> {
         tx
     } else {
         let (tx, switcher) = start_audio_capture_with_switching(
-            cli.device.clone(),
+            initial_device.clone(),
             config.audio_sample_rate,
             config.audio_channels,
-            config.wasapi_exclusive,
+            wasapi_exclusive,
         );
         // Launch tray with device switching
         tray::spawn_tray(
-            cli.device.clone(),
+            initial_device.clone(),
             Some(switcher),
             url.clone(),
             log_path.clone(),

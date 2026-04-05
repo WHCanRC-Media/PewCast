@@ -1,6 +1,6 @@
-use serde::Deserialize;
-use std::path::Path;
-use tracing::info;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -63,5 +63,59 @@ impl Config {
         }
 
         Ok(config)
+    }
+}
+
+/// User preferences persisted across launches (device selection, exclusive mode).
+/// Stored in `%APPDATA%/whcanrc-assisted-listening/prefs.toml` on Windows,
+/// `~/.config/whcanrc-assisted-listening/prefs.toml` on Linux/macOS.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UserPrefs {
+    pub device: Option<String>,
+    pub wasapi_exclusive: Option<bool>,
+}
+
+impl UserPrefs {
+    fn prefs_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("whcanrc-assisted-listening").join("prefs.toml"))
+    }
+
+    /// Load saved preferences. Returns defaults if the file doesn't exist or is corrupt.
+    pub fn load() -> Self {
+        let Some(path) = Self::prefs_path() else {
+            return Self::default();
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => match toml::from_str(&contents) {
+                Ok(prefs) => {
+                    info!("Loaded user preferences from {}", path.display());
+                    prefs
+                }
+                Err(e) => {
+                    warn!("Failed to parse {}: {}, using defaults", path.display(), e);
+                    Self::default()
+                }
+            },
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Save current preferences to disk.
+    pub fn save(&self) {
+        let Some(path) = Self::prefs_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match toml::to_string_pretty(self) {
+            Ok(contents) => {
+                if let Err(e) = std::fs::write(&path, contents) {
+                    warn!("Failed to save preferences to {}: {}", path.display(), e);
+                }
+            }
+            Err(e) => warn!("Failed to serialize preferences: {}", e),
+        }
     }
 }
