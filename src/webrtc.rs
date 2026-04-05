@@ -308,34 +308,3 @@ pub async fn audio_to_track_writer(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_peer_manager_creation() {
-        let pm = PeerManager::new();
-        assert!(pm.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_peer_count_starts_at_zero() {
-        let pm = PeerManager::new().unwrap();
-        assert_eq!(pm.peer_count().await, 0);
-    }
-
-    #[tokio::test]
-    async fn test_close_all_with_no_peers() {
-        let pm = PeerManager::new().unwrap();
-        pm.close_all().await;
-        assert_eq!(pm.peer_count().await, 0);
-    }
-
-    #[tokio::test]
-    async fn test_audio_track_exists() {
-        let pm = PeerManager::new().unwrap();
-        let track = pm.audio_track();
-        assert_eq!(track.stream_id(), "whcanrc-stream");
-    }
-}

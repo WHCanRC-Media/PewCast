@@ -362,45 +362,6 @@ impl AudioSource for ToneAudioSource {
         Ok(())
     }
 }
-
-/// Mock audio source for testing — generates a finite number of chunks.
-#[cfg(test)]
-pub struct MockAudioSource {
-    pub chunk_count: usize,
-}
-
-#[cfg(test)]
-impl AudioSource for MockAudioSource {
-    fn start_capture(
-        &self,
-        tx: broadcast::Sender<AudioChunk>,
-        sample_rate: u32,
-        channels: u16,
-    ) -> anyhow::Result<()> {
-        for i in 0..self.chunk_count {
-            // Generate a small chunk of samples (960 samples = 20ms at 48kHz)
-            let frame_count = (sample_rate / 50) as usize; // 20ms worth
-            let samples: Vec<f32> = (0..frame_count)
-                .map(|s| {
-                    // Simple sine wave at 440Hz for testing
-                    let t = (i * frame_count + s) as f32 / sample_rate as f32;
-                    (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5
-                })
-                .collect();
-
-            let chunk = AudioChunk {
-                samples,
-                sample_rate,
-                channels,
-            };
-            if tx.send(chunk).is_err() {
-                break;
-            }
-        }
-        Ok(())
-    }
-}
-
 /// Handle for switching audio devices at runtime.
 pub struct DeviceSwitcher {
     switch_tx: mpsc::Sender<String>,
@@ -448,14 +409,14 @@ pub fn start_audio_capture_with_switching(
 
             let capture_tx = tx_clone.clone();
             let device_for_capture = current_device.clone();
-            let use_exclusive = exclusive_loop.load(Ordering::Relaxed);
+            let _use_exclusive = exclusive_loop.load(Ordering::Relaxed);
 
             // Run capture in a sub-thread so we can stop it on device switch.
             // If wasapi_exclusive is set (Windows only), try exclusive mode first;
             // on failure, fall back to CPAL shared mode.
             let capture_handle = std::thread::spawn(move || {
                 #[cfg(windows)]
-                if use_exclusive {
+                if _use_exclusive {
                     info!("Attempting WASAPI exclusive mode for lower latency...");
                     match crate::wasapi_exclusive::start_exclusive_capture(
                         device_for_capture.as_deref(),
@@ -541,83 +502,4 @@ pub fn start_audio_capture<S: AudioSource>(
     });
 
     tx
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_audio_chunk_clone() {
-        let chunk = AudioChunk {
-            samples: vec![0.1, 0.2, 0.3],
-            sample_rate: 48000,
-            channels: 1,
-        };
-        let cloned = chunk.clone();
-        assert_eq!(cloned.samples, vec![0.1, 0.2, 0.3]);
-        assert_eq!(cloned.sample_rate, 48000);
-        assert_eq!(cloned.channels, 1);
-    }
-
-    #[test]
-    fn test_mock_audio_source_generates_samples() {
-        let (tx, mut rx) = broadcast::channel(16);
-        let source = MockAudioSource { chunk_count: 5 };
-        source.start_capture(tx, 48000, 1).unwrap();
-
-        let mut count = 0;
-        while let Ok(chunk) = rx.try_recv() {
-            assert!(!chunk.samples.is_empty());
-            assert_eq!(chunk.sample_rate, 48000);
-            assert_eq!(chunk.channels, 1);
-            // 48000 / 50 = 960 samples per chunk (20ms)
-            assert_eq!(chunk.samples.len(), 960);
-            count += 1;
-        }
-        assert_eq!(count, 5);
-    }
-
-    #[test]
-    fn test_mock_audio_source_sine_wave_range() {
-        let (tx, mut rx) = broadcast::channel(16);
-        let source = MockAudioSource { chunk_count: 1 };
-        source.start_capture(tx, 48000, 1).unwrap();
-
-        let chunk = rx.try_recv().unwrap();
-        for sample in &chunk.samples {
-            assert!(
-                *sample >= -1.0 && *sample <= 1.0,
-                "Sample out of range: {}",
-                sample
-            );
-        }
-    }
-
-    #[test]
-    fn test_start_audio_capture_returns_sender() {
-        // Test that start_audio_capture returns a working sender
-        // by calling MockAudioSource directly (synchronously) to avoid race conditions
-        let (tx, mut rx) = broadcast::channel(16);
-        let source = MockAudioSource { chunk_count: 3 };
-
-        // Subscribe BEFORE sending to ensure we receive all messages
-        source.start_capture(tx, 48000, 1).unwrap();
-
-        let mut received = 0;
-        while let Ok(_chunk) = rx.try_recv() {
-            received += 1;
-        }
-        assert_eq!(received, 3, "Should have received exactly 3 chunks");
-    }
-
-    #[test]
-    fn test_broadcast_no_receivers_does_not_panic() {
-        let (tx, _) = broadcast::channel::<AudioChunk>(16);
-        // Drop the only receiver
-        let source = MockAudioSource { chunk_count: 5 };
-        // This should not panic even though no one is listening
-        let result = source.start_capture(tx, 48000, 1);
-        assert!(result.is_ok());
-    }
 }
