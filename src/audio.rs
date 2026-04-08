@@ -3,12 +3,12 @@ use std::sync::{mpsc, Arc};
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
-/// A chunk of audio samples (mono f32, at the configured sample rate).
-/// Sent via broadcast channel to all WebRTC peer writers.
+/// A chunk of audio samples (mono i16, at the configured sample rate).
+/// Sent via broadcast channel to all transport writers.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct AudioChunk {
-    pub samples: Vec<f32>,
+    pub samples: Vec<i16>,
     pub sample_rate: u32,
     pub channels: u16,
 }
@@ -234,10 +234,12 @@ impl AudioSource for CpalAudioSource {
         let actual_sr = actual_config.sample_rate.0;
         let actual_ch = actual_config.channels;
 
-        // Closure to convert raw samples (f32 or pre-converted from i16) into an AudioChunk
-        let make_callback = |tx: broadcast::Sender<AudioChunk>| {
+        // Closure to convert raw f32 samples into an AudioChunk with i16 samples.
+        // Resampling/downmixing (if needed) is done in f32 for quality, then
+        // converted to i16 at the end.
+        let make_f32_callback = |tx: broadcast::Sender<AudioChunk>| {
             move |data: &[f32]| {
-                let samples = if needs_conversion {
+                let f32_samples: Vec<f32> = if needs_conversion {
                     let mono: Vec<f32> = if actual_ch > 1 {
                         data.chunks(actual_ch as usize)
                             .map(|frame| frame.iter().sum::<f32>() / actual_ch as f32)
@@ -266,6 +268,11 @@ impl AudioSource for CpalAudioSource {
                     data.to_vec()
                 };
 
+                let samples: Vec<i16> = f32_samples
+                    .iter()
+                    .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+                    .collect();
+
                 let chunk = AudioChunk {
                     samples,
                     sample_rate,
@@ -285,8 +292,24 @@ impl AudioSource for CpalAudioSource {
             });
         };
 
-        let stream = if use_i16 {
-            let callback = make_callback(tx);
+        let stream = if use_i16 && !needs_conversion {
+            // i16 device, no resampling/downmixing needed — pass through directly
+            device.build_input_stream(
+                &actual_config,
+                move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                    let chunk = AudioChunk {
+                        samples: data.to_vec(),
+                        sample_rate,
+                        channels,
+                    };
+                    let _ = tx.send(chunk);
+                },
+                err_callback,
+                None,
+            )?
+        } else if use_i16 {
+            // i16 device but needs resampling/downmixing — convert to f32 for processing
+            let callback = make_f32_callback(tx);
             device.build_input_stream(
                 &actual_config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
@@ -297,7 +320,8 @@ impl AudioSource for CpalAudioSource {
                 None,
             )?
         } else {
-            let callback = make_callback(tx);
+            // f32 device — convert to i16 at the end
+            let callback = make_f32_callback(tx);
             device.build_input_stream(
                 &actual_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
@@ -339,10 +363,11 @@ impl AudioSource for ToneAudioSource {
         let mut sample_offset: usize = 0;
 
         loop {
-            let samples: Vec<f32> = (0..frame_count)
+            let samples: Vec<i16> = (0..frame_count)
                 .map(|s| {
                     let t = (sample_offset + s) as f32 / sample_rate as f32;
-                    (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5
+                    let f = (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5;
+                    (f * i16::MAX as f32) as i16
                 })
                 .collect();
             sample_offset += frame_count;
@@ -362,6 +387,7 @@ impl AudioSource for ToneAudioSource {
         Ok(())
     }
 }
+
 /// Handle for switching audio devices at runtime.
 pub struct DeviceSwitcher {
     switch_tx: mpsc::Sender<String>,

@@ -204,11 +204,9 @@ async fn stream_audio_datagrams(
                     datagram.extend_from_slice(&seq.to_le_bytes());
                     datagram.extend_from_slice(&sample_offset.to_le_bytes());
 
-                    // PCM payload
+                    // PCM payload: i16 LE
                     for &s in fragment {
-                        let clamped = s.clamp(-1.0, 1.0);
-                        let sample = (clamped * i16::MAX as f32) as i16;
-                        datagram.extend_from_slice(&sample.to_le_bytes());
+                        datagram.extend_from_slice(&s.to_le_bytes());
                     }
 
                     // Send as datagram (unreliable, minimum latency)

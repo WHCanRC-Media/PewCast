@@ -256,7 +256,7 @@ impl WasapiExclusiveSource {
                     Some(&mut _qpc_position),
                 )?;
 
-                let samples = if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
+                let f32_samples = if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
                     // Silent buffer — produce zeros
                     vec![0.0f32; num_frames as usize]
                 } else {
@@ -267,23 +267,29 @@ impl WasapiExclusiveSource {
 
                 // Downmix to mono if needed
                 let mono = if needs_downmix {
-                    samples
+                    f32_samples
                         .chunks(actual_ch as usize)
                         .map(|frame| frame.iter().sum::<f32>() / actual_ch as f32)
                         .collect()
                 } else {
-                    samples
+                    f32_samples
                 };
 
                 // Resample if needed
-                let final_samples = if needs_resample {
+                let final_f32 = if needs_resample {
                     resample(&mono, actual_sr, target_sr)
                 } else {
                     mono
                 };
 
+                // Convert to i16
+                let samples: Vec<i16> = final_f32
+                    .iter()
+                    .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+                    .collect();
+
                 let chunk = AudioChunk {
-                    samples: final_samples,
+                    samples,
                     sample_rate: target_sr,
                     channels: target_ch,
                 };

@@ -239,11 +239,8 @@ pub async fn audio_to_track_writer(
                         pcm_buffer[start..].copy_from_slice(&chirp_i16);
                     }
                 } else {
-                    // Normal mode: forward mic audio
-                    for &s in &chunk.samples {
-                        let clamped = s.clamp(-1.0, 1.0);
-                        pcm_buffer.push((clamped * i16::MAX as f32) as i16);
-                    }
+                    // Normal mode: forward mic audio (already i16)
+                    pcm_buffer.extend_from_slice(&chunk.samples);
                 }
 
                 // Encode complete frames

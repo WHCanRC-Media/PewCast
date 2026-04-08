@@ -148,7 +148,14 @@ pub async fn chirp_detector(state: Arc<ChirpState>, mut audio_rx: broadcast::Rec
                     continue;
                 }
 
-                if let Some(offset) = detect_chirp(&chunk.samples, chirp, threshold) {
+                // Convert i16 samples to f32 for chirp detection
+                let f32_samples: Vec<f32> = chunk
+                    .samples
+                    .iter()
+                    .map(|&s| s as f32 / i16::MAX as f32)
+                    .collect();
+
+                if let Some(offset) = detect_chirp(&f32_samples, chirp, threshold) {
                     let now = state.now_micros();
                     let last_send = state.last_send_micros();
 

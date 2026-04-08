@@ -1,0 +1,16 @@
+#!/bin/sh
+# Gradle wrapper bootstrap — downloads gradle if needed
+APP_NAME="Gradle"
+GRADLE_VERSION="8.11.1"
+GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-${GRADLE_VERSION}-bin"
+GRADLE_BIN="$GRADLE_HOME/gradle-${GRADLE_VERSION}/bin/gradle"
+
+if [ ! -f "$GRADLE_BIN" ]; then
+    echo "Downloading Gradle ${GRADLE_VERSION}..."
+    mkdir -p "$GRADLE_HOME"
+    curl -sL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o "$GRADLE_HOME/gradle.zip"
+    unzip -qo "$GRADLE_HOME/gradle.zip" -d "$GRADLE_HOME"
+    rm "$GRADLE_HOME/gradle.zip"
+fi
+
+exec "$GRADLE_BIN" "$@"

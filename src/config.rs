@@ -15,6 +15,8 @@ pub struct Config {
     /// Use WASAPI exclusive mode on Windows for lower capture latency.
     /// Falls back to shared mode if exclusive mode fails.
     pub wasapi_exclusive: bool,
+    /// Timeout in seconds before reaping UDP clients with no heartbeat.
+    pub heartbeat_timeout_secs: u64,
 }
 
 impl Default for Config {
@@ -26,6 +28,7 @@ impl Default for Config {
             audio_channels: 1,
             opus_frame_ms: 5,
             wasapi_exclusive: false,
+            heartbeat_timeout_secs: 15,
         }
     }
 }
@@ -60,6 +63,9 @@ impl Config {
         }
         if let Ok(val) = std::env::var("WHCANRC_WASAPI_EXCLUSIVE") {
             config.wasapi_exclusive = val == "1" || val.eq_ignore_ascii_case("true");
+        }
+        if let Ok(val) = std::env::var("WHCANRC_HEARTBEAT_TIMEOUT_SECS") {
+            config.heartbeat_timeout_secs = val.parse()?;
         }
 
         Ok(config)

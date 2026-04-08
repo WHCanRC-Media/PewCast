@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use std::net::SocketAddr;
+
+use axum::extract::connect_info::ConnectInfo;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
@@ -14,6 +17,7 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
+use crate::client_registry::ClientRegistry;
 use crate::config::Config;
 use crate::webrtc::PeerManager;
 use crate::webtransport::WebTransportState;
@@ -29,6 +33,10 @@ pub struct AppState {
     pub webtransport_port: u16,
     /// Shared state containing WebTransport certificate hash.
     pub webtransport_state: Arc<RwLock<Option<WebTransportState>>>,
+    /// Native UDP client registry.
+    pub client_registry: Arc<ClientRegistry>,
+    /// Port for native UDP audio streaming.
+    pub udp_port: u16,
     /// Server configuration (for diagnostics endpoint).
     pub config: Config,
 }
@@ -69,6 +77,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/transport-info", get(transport_info_handler))
         .route("/latency_test/report", post(latency_report_handler))
         .route("/latency_test/server-info", get(server_info_handler))
+        .route("/udp/join", post(udp_join_handler))
+        .route("/udp/heartbeat", post(udp_heartbeat_handler))
+        .route("/udp/leave", post(udp_leave_handler))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -353,4 +364,188 @@ async fn server_info_handler(State(state): State<Arc<AppState>>) -> Json<ServerI
         capture_buffer_ms: capture_ms,
         active_peers: state.peer_manager.peer_count().await,
     })
+}
+
+// --- Native UDP client API ---
+
+#[derive(Deserialize)]
+struct UdpJoinRequest {
+    port: u16,
+}
+
+#[derive(Serialize)]
+struct UdpJoinResponse {
+    client_id: String,
+    udp_port: u16,
+    sample_rate: u32,
+}
+
+#[derive(Deserialize)]
+struct UdpHeartbeatRequest {
+    client_id: String,
+}
+
+#[derive(Deserialize)]
+struct UdpLeaveRequest {
+    client_id: String,
+}
+
+async fn udp_join_handler(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    Json(req): Json<UdpJoinRequest>,
+) -> Json<UdpJoinResponse> {
+    let client_addr = SocketAddr::new(peer_addr.ip(), req.port);
+    let client_id = state.client_registry.join(client_addr);
+
+    Json(UdpJoinResponse {
+        client_id,
+        udp_port: state.udp_port,
+        sample_rate: state.config.audio_sample_rate,
+    })
+}
+
+async fn udp_heartbeat_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UdpHeartbeatRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if state.client_registry.heartbeat(&req.client_id) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, "unknown client".to_string()))
+    }
+}
+
+async fn udp_leave_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UdpLeaveRequest>,
+) -> StatusCode {
+    state.client_registry.leave(&req.client_id);
+    StatusCode::NO_CONTENT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_app_state() -> Arc<AppState> {
+        Arc::new(AppState {
+            peer_manager: PeerManager::new().unwrap(),
+            last_peer: Mutex::new(None),
+            webtransport_port: 8081,
+            webtransport_state: Arc::new(RwLock::new(None)),
+            client_registry: Arc::new(ClientRegistry::new()),
+            udp_port: 8082,
+            config: Config::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_index_returns_html() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("Listen"));
+    }
+
+    #[tokio::test]
+    async fn test_status_endpoint() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status: StatusResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status.status, "running");
+        assert_eq!(status.active_peers, 0);
+    }
+
+    #[tokio::test]
+    async fn test_offer_with_invalid_sdp() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/offer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sdp": "invalid", "type": "offer"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should return an error (either 400 or 500 depending on how webrtc-rs handles it)
+        assert!(response.status().is_client_error() || response.status().is_server_error());
+    }
+
+    #[tokio::test]
+    async fn test_ice_candidate_without_peer() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ice-candidate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"candidate": "candidate:1 1 UDP 2122252543 192.168.1.1 12345 typ host", "sdpMid": "0", "sdpMLineIndex": 0}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_offer_with_malformed_json() {
+        let state = test_app_state();
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/offer")
+                    .header("content-type", "application/json")
+                    .body(Body::from("not json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status().is_client_error());
+    }
 }

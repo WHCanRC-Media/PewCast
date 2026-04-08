@@ -1,11 +1,14 @@
 // On Windows, show console window on launch for log visibility.
 
 mod audio;
+mod client_registry;
 mod config;
 mod latency_test;
+mod mdns;
 mod qos;
 mod server;
 mod tray;
+mod udp_sender;
 #[cfg(windows)]
 mod wasapi_exclusive;
 mod webrtc;
@@ -22,6 +25,7 @@ use tracing::{error, info};
 use audio::{
     list_input_devices, start_audio_capture, start_audio_capture_with_switching, ToneAudioSource,
 };
+use client_registry::ClientRegistry;
 use config::{Config, UserPrefs};
 use server::{build_router, AppState};
 use webrtc::{audio_to_track_writer, PeerManager};
@@ -202,16 +206,26 @@ async fn main() -> anyhow::Result<()> {
 
     // Build application state and HTTP server
     let webtransport_port = config.port + 1; // WebTransport on port+1 (e.g., 8081)
+    let udp_port = config.port + 2; // Native UDP on port+2 (e.g., 8082)
 
     // Shared state for WebTransport cert hash
     let wt_state: Arc<tokio::sync::RwLock<Option<WebTransportState>>> =
         Arc::new(tokio::sync::RwLock::new(None));
+
+    // Create client registry for native UDP clients and spawn reaper
+    let client_registry = Arc::new(ClientRegistry::new());
+    ClientRegistry::spawn_reaper(
+        Arc::clone(&client_registry),
+        std::time::Duration::from_secs(config.heartbeat_timeout_secs),
+    );
 
     let app_state = Arc::new(AppState {
         peer_manager,
         last_peer: Mutex::new(None),
         webtransport_port,
         webtransport_state: Arc::clone(&wt_state),
+        client_registry: Arc::clone(&client_registry),
+        udp_port,
         config: config.clone(),
     });
 
@@ -235,10 +249,21 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Start native UDP unicast sender
+    let udp_audio_rx = audio_tx.subscribe();
+    let udp_registry = Arc::clone(&client_registry);
+    tokio::spawn(async move {
+        udp_sender::run(udp_audio_rx, udp_registry, udp_port).await;
+    });
+
+    // Advertise via mDNS for native client discovery
+    let _mdns = mdns::advertise(&config);
+
     let tls_config = RustlsConfig::from_pem(cert_pem.into(), key_pem.into()).await?;
 
     info!("Listening on {}", url);
     info!("WebTransport available on port {}", webtransport_port);
+    info!("Native UDP available on port {}", udp_port);
     info!("Note: self-signed cert — accept the browser warning to connect");
 
     // Print QR code to terminal (compact using Unicode half-blocks)
@@ -270,7 +295,7 @@ async fn main() -> anyhow::Result<()> {
 
     axum_server::bind_rustls(addr, tls_config)
         .handle(handle)
-        .serve(app.into_make_service())
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
 
     info!("Server stopped, ports released");
