@@ -3,7 +3,6 @@
 mod audio;
 mod client_registry;
 mod config;
-mod latency_test;
 mod mdns;
 mod qos;
 mod server;
@@ -41,11 +40,6 @@ struct Cli {
     /// Stream a 440Hz test tone instead of capturing from the audio input device
     #[arg(long)]
     test_tone: bool,
-
-    /// Enable round-trip latency measurement: injects a 2ms chirp every second
-    /// and listens for it to return through the mic
-    #[arg(long)]
-    latency_test: bool,
 
     /// Audio input device name (default: system default device)
     #[arg(long)]
@@ -176,32 +170,12 @@ async fn main() -> anyhow::Result<()> {
         tx
     };
 
-    // Set up latency test if requested
-    let chirp_state = if cli.latency_test {
-        let state = std::sync::Arc::new(latency_test::ChirpState::new(config.audio_sample_rate));
-        info!("Latency test enabled — injecting chirp every second");
-
-        // Spawn the 1-second chirp timer
-        let timer_state = Arc::clone(&state);
-        tokio::spawn(latency_test::chirp_timer(timer_state));
-
-        // Spawn the chirp detector on raw mic audio
-        let detector_state = Arc::clone(&state);
-        let detector_rx = audio_tx.subscribe();
-        tokio::spawn(latency_test::chirp_detector(detector_state, detector_rx));
-
-        Some(state)
-    } else {
-        None
-    };
-
     // Start the audio-to-WebRTC-track writer
     let audio_rx = audio_tx.subscribe();
     tokio::spawn(audio_to_track_writer(
         audio_track,
         audio_rx,
         config.opus_frame_ms,
-        chirp_state,
     ));
 
     // Build application state and HTTP server

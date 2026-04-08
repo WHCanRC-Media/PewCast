@@ -1,7 +1,6 @@
 pub mod audio;
 pub mod client_registry;
 pub mod config;
-pub mod latency_test;
 pub mod mdns;
 pub mod qos;
 pub mod server;

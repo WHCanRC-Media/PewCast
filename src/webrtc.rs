@@ -175,7 +175,6 @@ pub async fn audio_to_track_writer(
     track: Arc<TrackLocalStaticSample>,
     mut audio_rx: broadcast::Receiver<AudioChunk>,
     opus_frame_ms: u64,
-    chirp_state: Option<Arc<crate::latency_test::ChirpState>>,
 ) {
     use audiopus::coder::Encoder;
     use audiopus::{Application, Bitrate, Channels, SampleRate, Signal};
@@ -206,9 +205,8 @@ pub async fn audio_to_track_writer(
     // Buffer to accumulate samples into complete Opus frames
     let mut pcm_buffer: Vec<i16> = Vec::with_capacity(opus_frame_size * 2);
     let mut opus_output = vec![0u8; 4000]; // max Opus packet size
-    let mut chirp_gen = 0u64;
 
-    // Send timing instrumentation (similar to DataChannel path)
+    // Send timing instrumentation
     let start_time = std::time::Instant::now();
     let mut last_send = start_time;
     let mut send_count: u64 = 0;
@@ -224,24 +222,7 @@ pub async fn audio_to_track_writer(
                     continue;
                 }
 
-                if let Some(ref cs) = chirp_state {
-                    // Latency test mode: send silence (same length as mic data)
-                    // plus chirp when armed — avoids feedback loop
-                    pcm_buffer.extend(std::iter::repeat_n(0i16, chunk.samples.len()));
-                    if cs.should_inject(&mut chirp_gen) {
-                        let chirp_i16: Vec<i16> = cs
-                            .chirp_waveform
-                            .iter()
-                            .map(|&s| (s * i16::MAX as f32) as i16)
-                            .collect();
-                        // Overwrite the tail of the buffer with the chirp
-                        let start = pcm_buffer.len().saturating_sub(chirp_i16.len());
-                        pcm_buffer[start..].copy_from_slice(&chirp_i16);
-                    }
-                } else {
-                    // Normal mode: forward mic audio (already i16)
-                    pcm_buffer.extend_from_slice(&chunk.samples);
-                }
+                pcm_buffer.extend_from_slice(&chunk.samples);
 
                 // Encode complete frames
                 while pcm_buffer.len() >= opus_frame_size {
