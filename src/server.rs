@@ -231,13 +231,13 @@ async fn latency_report_handler(Json(report): Json<LatencyReport>) -> StatusCode
     info!("  User-Agent: {}", report.user_agent);
 
     if let Some(v) = report.output_latency_ms {
-        info!("  AudioContext.outputLatency: {:.1}ms (playout)", v);
+        info!("  Output latency: {:.1}ms (playout)", v);
     }
     if let Some(v) = report.base_latency_ms {
-        info!("  AudioContext.baseLatency: {:.1}ms (processing)", v);
+        info!("  Base latency: {:.1}ms (processing)", v);
     }
     if let Some(sr) = report.audio_ctx_sample_rate {
-        info!("  AudioContext.sampleRate: {}Hz", sr);
+        info!("  Sample rate: {}Hz", sr);
     }
 
     if let Some(ref rtt) = report.chirp_rtt {
@@ -300,7 +300,7 @@ async fn latency_report_handler(Json(report): Json<LatencyReport>) -> StatusCode
         || report.packets_received.is_some()
         || report.jitter.is_some()
     {
-        info!("  WebRTC stats:");
+        info!("  Transport stats:");
         if let Some(v) = report.jitter_buffer_delay_ms {
             info!("    Jitter buffer delay: {:.1}ms", v);
         }

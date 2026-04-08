@@ -1,21 +1,26 @@
 #pragma once
 
 /**
- * ChirpTester - Round-trip audio latency measurement
+ * ChirpTester - Round-trip audio latency measurement with diagnostics
  *
  * Measures the time for audio to travel:
  *   Phone speaker -> Air -> Server mic -> Network -> Phone -> Detect
  *
+ * Also runs UDP ping probes for network RTT measurement and tracks
+ * packet loss via sequence numbers.
+ *
  * Usage:
  *   ChirpTester tester;
- *   tester.startTest();
+ *   tester.startTest("192.168.1.100", 8082);
  *   // Poll getLatencyMs() until != -1
  *   int latency = tester.getLatencyMs();  // -2 = timeout, >0 = ms
  *   tester.stopTest();
+ *   // Access diagnostics: getPingRttMs(), getPacketsReceived(), etc.
  */
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 #include <oboe/Oboe.h>
@@ -34,10 +39,16 @@ public:
     /// Close the audio stream. Safe to call multiple times.
     void shutdown();
 
-    /// Start latency test. Returns false if already running or not initialized.
+    /// Start latency test with diagnostics.
+    /// serverAddr: server IP for sending ping probes (e.g., "192.168.1.100")
+    /// serverUdpPort: server UDP port for ping probes
     /// listenPort: local UDP port to receive audio on (0 = auto-assign).
-    /// Call getLatencyMs() to poll for results.
-    bool startTest(int listenPort = 0);
+    /// Starts network threads and ping probes but does NOT play chirp yet.
+    /// Call playChirp() after joining the server to trigger the measurement.
+    bool startTest(const char* serverAddr, int serverUdpPort, int listenPort = 0);
+
+    /// Trigger chirp playback. Call after server registration so audio is flowing.
+    void playChirp();
 
     /// Returns the local UDP port bound for this test (valid after startTest).
     int getListenPort() const { return mListenPort; }
@@ -54,6 +65,20 @@ public:
     /// Returns true if test is currently running.
     bool isRunning() const;
 
+    // ==================== DIAGNOSTICS ====================
+
+    /// Get ping RTT measurements in microseconds (thread-safe copy).
+    std::vector<int64_t> getPingRttUs();
+
+    /// Get number of audio packets received during the test.
+    int getPacketsReceived() const { return mPacketsReceived.load(); }
+
+    /// Get number of audio packets lost (seq gaps) during the test.
+    int getPacketsLost() const { return mPacketsLost.load(); }
+
+    /// Get Oboe output latency in milliseconds, or -1 if unavailable.
+    double getOutputLatencyMs() const;
+
 private:
     // Oboe callback - fills output buffer with chirp samples
     oboe::DataCallbackResult onAudioReady(
@@ -63,6 +88,9 @@ private:
 
     // Network receive thread - listens for and detects chirp in server audio
     void networkThread();
+
+    // Ping probe sending thread
+    void pingThread();
 
     // Cross-correlate chirp template against audio buffer, return peak
     // correlation value. Sets peakPos to sample offset of peak within buffer.
@@ -83,9 +111,13 @@ private:
     static constexpr int kHeaderSize = 8;          // [seq:4][timestamp:4]
     static constexpr int kMaxSamplesPerDatagram = 240;
     static constexpr int kMaxPacketSize = kHeaderSize + kMaxSamplesPerDatagram * 2;
+    static constexpr int kPingProbeSize = 8;       // [seq:4][last_rtt_us:4]
 
     // Test timeout
     static constexpr int kTimeoutMs = 2000;        // Give up after 2 seconds
+
+    // Ping probe interval
+    static constexpr int kPingIntervalMs = 50;     // Send a ping every 50ms
 
     // Cross-correlation detection threshold (normalized, 0.0 to 1.0)
     static constexpr float kCorrelationThreshold = 0.4f;
@@ -113,9 +145,28 @@ private:
     int mSocket = -1;                              // UDP unicast socket
     int mListenPort = 0;                           // Bound local port
 
+    // Server address for ping probes
+    std::string mServerAddr;
+    int mServerUdpPort = 0;
+
+    // Ping probe state
+    std::atomic<uint32_t> mPingSeq{0};             // Next ping sequence number
+    std::atomic<uint32_t> mLastPingRttUs{0};       // Last measured RTT in microseconds
+    std::mutex mPingRttMutex;
+    std::vector<int64_t> mPingRttUs;               // All ping RTT measurements in microseconds
+    // Map from seq -> send timestamp for pending pings
+    std::mutex mPingPendingMutex;
+    std::vector<std::pair<uint32_t, int64_t>> mPingPending;  // (seq, sentTimeNs)
+
+    // Packet tracking
+    std::atomic<int> mPacketsReceived{0};
+    std::atomic<int> mPacketsLost{0};
+    int32_t mLastSeq = -1;                         // Last audio packet sequence number
+
     // Threading
     std::atomic<bool> mRunning{false};             // Test running flag
     std::thread mNetworkThread;                    // Receives and analyzes server audio
+    std::thread mPingThread;                       // Sends ping probes
 
     // Audio output
     std::shared_ptr<oboe::AudioStream> mStream;   // Oboe output stream for chirp

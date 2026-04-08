@@ -71,7 +71,7 @@ Java_org_whcanrc_assistedlistening_audio_AudioEngine_nativeGetPeakLevel(JNIEnv* 
 
 JNIEXPORT jboolean JNICALL
 Java_org_whcanrc_assistedlistening_audio_ChirpTester_nativeStartTest(JNIEnv* env, jobject thiz,
-        jint listenPort) {
+        jstring serverAddr, jint serverUdpPort, jint listenPort) {
     if (!gChirpTester) {
         gChirpTester = new audioengine::ChirpTester();
         if (!gChirpTester->init()) {
@@ -81,7 +81,17 @@ Java_org_whcanrc_assistedlistening_audio_ChirpTester_nativeStartTest(JNIEnv* env
         }
     }
     gChirpTester->stopTest();  // Stop any previous test
-    return gChirpTester->startTest(listenPort) ? JNI_TRUE : JNI_FALSE;
+    const char* addr = env->GetStringUTFChars(serverAddr, nullptr);
+    bool ok = gChirpTester->startTest(addr, serverUdpPort, listenPort);
+    env->ReleaseStringUTFChars(serverAddr, addr);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_org_whcanrc_assistedlistening_audio_ChirpTester_nativePlayChirp(JNIEnv* env, jobject thiz) {
+    if (gChirpTester) {
+        gChirpTester->playChirp();
+    }
 }
 
 JNIEXPORT jint JNICALL
@@ -114,6 +124,35 @@ Java_org_whcanrc_assistedlistening_audio_ChirpTester_nativeGetLatencyMs(JNIEnv* 
 JNIEXPORT jboolean JNICALL
 Java_org_whcanrc_assistedlistening_audio_ChirpTester_nativeIsRunning(JNIEnv* env, jobject thiz) {
     return (gChirpTester && gChirpTester->isRunning()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_org_whcanrc_assistedlistening_audio_ChirpTester_nativeGetPingRttUs(JNIEnv* env, jobject thiz) {
+    if (!gChirpTester) {
+        return env->NewLongArray(0);
+    }
+    auto rtts = gChirpTester->getPingRttUs();
+    jlongArray result = env->NewLongArray(static_cast<jsize>(rtts.size()));
+    if (!rtts.empty()) {
+        env->SetLongArrayRegion(result, 0, static_cast<jsize>(rtts.size()),
+                                reinterpret_cast<const jlong*>(rtts.data()));
+    }
+    return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_whcanrc_assistedlistening_audio_ChirpTester_nativeGetPacketsReceived(JNIEnv* env, jobject thiz) {
+    return gChirpTester ? gChirpTester->getPacketsReceived() : 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_whcanrc_assistedlistening_audio_ChirpTester_nativeGetPacketsLost(JNIEnv* env, jobject thiz) {
+    return gChirpTester ? gChirpTester->getPacketsLost() : 0;
+}
+
+JNIEXPORT jdouble JNICALL
+Java_org_whcanrc_assistedlistening_audio_ChirpTester_nativeGetOutputLatencyMs(JNIEnv* env, jobject thiz) {
+    return gChirpTester ? gChirpTester->getOutputLatencyMs() : -1.0;
 }
 
 }  // extern "C"

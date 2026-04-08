@@ -1,5 +1,5 @@
 /**
- * ChirpTester - Measures round-trip audio latency
+ * ChirpTester - Measures round-trip audio latency with diagnostics
  *
  * LATENCY TEST FLOW:
  * ==================
@@ -9,10 +9,19 @@
  * 4. Android receives UDP packets, converts i16 to float, detects chirp
  * 5. Latency = time from chirp playback start to chirp detection
  *
+ * DIAGNOSTICS:
+ * - UDP ping probes: 8-byte packets echoed by server for network RTT
+ * - Packet loss: tracked via sequence number gaps
+ * - Oboe output latency: hardware playout latency from Oboe stream
+ *
  * PACKET FORMAT (from server):
  * [0-3]   seq:       u32 LE - packet sequence number
  * [4-7]   timestamp: u32 LE - sample offset (RTP-style)
  * [8+]    pcm:       i16 LE - raw PCM samples (up to 240 samples)
+ *
+ * PING PROBE FORMAT (client<->server):
+ * [0-3]   seq:         u32 LE - probe sequence number
+ * [4-7]   last_rtt_us: u32 LE - last measured RTT in microseconds
  */
 
 #include "chirp_tester.h"
@@ -30,6 +39,12 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace audioengine {
+
+static int64_t nowNs() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
 
 ChirpTester::ChirpTester() {
     // Pre-generate the chirp waveform (linear frequency sweep from 1kHz to 4kHz)
@@ -117,7 +132,7 @@ void ChirpTester::shutdown() {
     LOGI("ChirpTester shutdown");
 }
 
-bool ChirpTester::startTest(int listenPort) {
+bool ChirpTester::startTest(const char* serverAddr, int serverUdpPort, int listenPort) {
     if (mRunning.load()) {
         return false;
     }
@@ -130,6 +145,23 @@ bool ChirpTester::startTest(int listenPort) {
     mLatencyMs.store(-1);
     mChirpPlayPos.store(0);
     mPlaying.store(false);
+    mServerAddr = serverAddr;
+    mServerUdpPort = serverUdpPort;
+
+    // Reset diagnostics
+    mPingSeq.store(0);
+    mLastPingRttUs.store(0);
+    {
+        std::lock_guard<std::mutex> lock(mPingRttMutex);
+        mPingRttUs.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(mPingPendingMutex);
+        mPingPending.clear();
+    }
+    mPacketsReceived.store(0);
+    mPacketsLost.store(0);
+    mLastSeq = -1;
 
     // Set up UDP unicast socket to receive server audio
     mSocket = socket(AF_INET, SOCK_DGRAM, 0);
@@ -170,21 +202,31 @@ bool ChirpTester::startTest(int listenPort) {
     setsockopt(mSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     // Initialize timestamp
-    timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    mChirpStartTimeNs.store(ts.tv_sec * 1000000000LL + ts.tv_nsec);
+    mChirpStartTimeNs.store(nowNs());
 
     // Reset cross-correlation state
     mPrevFrame.clear();
     mPrevFrameTimeNs = 0;
 
-    // Start
+    // Start network and ping threads (chirp playback deferred to playChirp())
     mRunning.store(true);
-    mPlaying.store(true);
+    mPlaying.store(false);
     mNetworkThread = std::thread(&ChirpTester::networkThread, this);
+    mPingThread = std::thread(&ChirpTester::pingThread, this);
 
-    LOGI("Chirp test started");
+    LOGI("Chirp test started (server=%s:%d, listenPort=%d, chirp deferred)", serverAddr, serverUdpPort, mListenPort);
     return true;
+}
+
+void ChirpTester::playChirp() {
+    if (!mRunning.load()) {
+        LOGE("playChirp called but test not running");
+        return;
+    }
+    mChirpPlayPos.store(0);
+    mChirpStartTimeNs.store(nowNs());
+    mPlaying.store(true);
+    LOGI("Chirp playback triggered");
 }
 
 void ChirpTester::stopTest() {
@@ -198,6 +240,9 @@ void ChirpTester::stopTest() {
     if (mNetworkThread.joinable()) {
         mNetworkThread.join();
     }
+    if (mPingThread.joinable()) {
+        mPingThread.join();
+    }
 
     if (mSocket >= 0) {
         close(mSocket);
@@ -205,7 +250,9 @@ void ChirpTester::stopTest() {
     }
     mListenPort = 0;
 
-    LOGI("Chirp test stopped");
+    LOGI("Chirp test stopped (packets=%d, lost=%d, pings=%zu)",
+         mPacketsReceived.load(), mPacketsLost.load(),
+         [this]{ std::lock_guard<std::mutex> lock(mPingRttMutex); return mPingRttUs.size(); }());
 }
 
 int ChirpTester::getLatencyMs() const {
@@ -214,6 +261,22 @@ int ChirpTester::getLatencyMs() const {
 
 bool ChirpTester::isRunning() const {
     return mRunning.load();
+}
+
+std::vector<int64_t> ChirpTester::getPingRttUs() {
+    std::lock_guard<std::mutex> lock(mPingRttMutex);
+    return mPingRttUs;
+}
+
+double ChirpTester::getOutputLatencyMs() const {
+    if (!mStream) return -1.0;
+
+    // Oboe provides frames of latency in the output pipeline
+    auto result = mStream->calculateLatencyMillis();
+    if (result) {
+        return result.value();
+    }
+    return -1.0;
 }
 
 oboe::DataCallbackResult ChirpTester::onAudioReady(
@@ -228,9 +291,7 @@ oboe::DataCallbackResult ChirpTester::onAudioReady(
 
         // Record the precise timestamp when the FIRST chirp sample is written
         if (playPos == 0) {
-            timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            mChirpStartTimeNs.store(ts.tv_sec * 1000000000LL + ts.tv_nsec);
+            mChirpStartTimeNs.store(nowNs());
         }
 
         for (int i = 0; i < numFrames; i++) {
@@ -253,6 +314,46 @@ oboe::DataCallbackResult ChirpTester::onAudioReady(
     return oboe::DataCallbackResult::Continue;
 }
 
+void ChirpTester::pingThread() {
+    LOGI("Ping thread started (target=%s:%d)", mServerAddr.c_str(), mServerUdpPort);
+
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(mServerUdpPort);
+    if (inet_pton(AF_INET, mServerAddr.c_str(), &serverAddr.sin_addr) != 1) {
+        LOGE("Invalid server address for pings: %s", mServerAddr.c_str());
+        return;
+    }
+
+    while (mRunning.load()) {
+        // Build ping probe: [seq:4][last_rtt_us:4]
+        uint8_t probe[kPingProbeSize];
+        uint32_t seq = mPingSeq.fetch_add(1);
+        uint32_t lastRttUs = mLastPingRttUs.load();
+        memcpy(probe, &seq, sizeof(seq));
+        memcpy(probe + 4, &lastRttUs, sizeof(lastRttUs));
+
+        int64_t sentNs = nowNs();
+
+        ssize_t sent = sendto(mSocket, probe, kPingProbeSize, 0,
+                              reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr));
+        if (sent == kPingProbeSize) {
+            std::lock_guard<std::mutex> lock(mPingPendingMutex);
+            mPingPending.emplace_back(seq, sentNs);
+            // Expire old pending probes (>2 seconds)
+            int64_t cutoff = sentNs - 2000000000LL;
+            while (!mPingPending.empty() && mPingPending.front().second < cutoff) {
+                mPingPending.erase(mPingPending.begin());
+            }
+        }
+
+        // Sleep for ping interval
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPingIntervalMs));
+    }
+
+    LOGI("Ping thread stopped");
+}
+
 void ChirpTester::networkThread() {
     uint8_t packet[kMaxPacketSize];
     float pcmBuffer[kMaxSamplesPerDatagram];
@@ -261,14 +362,24 @@ void ChirpTester::networkThread() {
 
     LOGI("Detection thread started, startTimeNs=%lld", (long long)mChirpStartTimeNs.load());
 
-    while (mRunning.load()) {
-        // Check timeout
-        timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        int64_t nowNs = ts.tv_sec * 1000000000LL + ts.tv_nsec;
-        int64_t elapsedMs = (nowNs - mChirpStartTimeNs.load()) / 1000000;
+    int64_t threadStartNs = nowNs();
 
-        if (elapsedMs > kTimeoutMs && mLatencyMs.load() == -1) {
+    while (mRunning.load()) {
+        // Check timeout (only after chirp has been played)
+        int64_t now = nowNs();
+        int64_t chirpStartNs = mChirpStartTimeNs.load();
+        int64_t elapsedMs = (now - chirpStartNs) / 1000000;
+        bool chirpWasPlayed = mChirpPlayPos.load() > 0;
+
+        // Safety timeout: 30 seconds if playChirp() was never called
+        int64_t totalElapsedMs = (now - threadStartNs) / 1000000;
+        if (totalElapsedMs > 30000 && mLatencyMs.load() == -1) {
+            mLatencyMs.store(-2);
+            LOGI("Safety timeout after %lld ms (chirp never triggered?)", (long long)totalElapsedMs);
+            break;
+        }
+
+        if (chirpWasPlayed && elapsedMs > kTimeoutMs && mLatencyMs.load() == -1) {
             mLatencyMs.store(-2);
             LOGI("Chirp detection timed out after %lld ms, received %d packets, maxCorr=%.4f",
                  (long long)elapsedMs, packetCount, maxCorr);
@@ -289,12 +400,46 @@ void ChirpTester::networkThread() {
             continue;
         }
 
-        // Minimum valid packet: 8-byte header + at least 1 i16 sample
+        // Handle ping echo (exactly 8 bytes)
+        if (len == kPingProbeSize) {
+            int64_t recvNs = nowNs();
+            uint32_t echoSeq;
+            memcpy(&echoSeq, packet, sizeof(echoSeq));
+
+            std::lock_guard<std::mutex> lock(mPingPendingMutex);
+            for (auto it = mPingPending.begin(); it != mPingPending.end(); ++it) {
+                if (it->first == echoSeq) {
+                    int64_t rttUs = (recvNs - it->second) / 1000;
+                    mLastPingRttUs.store(static_cast<uint32_t>(rttUs));
+                    {
+                        std::lock_guard<std::mutex> rttLock(mPingRttMutex);
+                        mPingRttUs.push_back(rttUs);
+                    }
+                    mPingPending.erase(it);
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // Minimum valid audio packet: 8-byte header + at least 1 i16 sample
         if (len < kHeaderSize + 2) continue;
 
         // Record receive timestamp
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        int64_t frameTimeNs = ts.tv_sec * 1000000000LL + ts.tv_nsec;
+        int64_t frameTimeNs = nowNs();
+
+        // Track packet sequence for loss detection
+        uint32_t seq;
+        memcpy(&seq, packet, sizeof(seq));
+        mPacketsReceived.fetch_add(1);
+
+        if (mLastSeq >= 0) {
+            int32_t gap = static_cast<int32_t>(seq) - mLastSeq - 1;
+            if (gap > 0 && gap < 1000) {
+                mPacketsLost.fetch_add(gap);
+            }
+        }
+        mLastSeq = static_cast<int32_t>(seq);
 
         // Convert raw PCM i16 LE payload to float
         int payloadBytes = static_cast<int>(len) - kHeaderSize;
