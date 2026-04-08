@@ -157,7 +157,8 @@ let transportMode = null; // 'webtransport' or 'webrtc'
 let webtransportPort = null;
 
 // Chirp detection
-let chirpSentTime = 0;
+let chirpSentTime = 0;         // performance.now() at chirp send (WebTransport path)
+let chirpSentAudioTime = 0;    // audioCtx.currentTime at chirp send (WebRTC path)
 let latencyHistory = [];
 let detectorWorklet = null;
 
@@ -168,11 +169,12 @@ let audioRttPending = new Map(); // seq -> sentTime
 let audioRttSeq = 0;
 let audioRttLastUs = 0;
 
-// Chirp parameters (must match generation)
+// Chirp parameters (must match Android chirp_tester.cpp)
 const CHIRP_FREQ_START = 1000;
 const CHIRP_FREQ_END = 4000;
-const CHIRP_DURATION = 0.02; // 20ms
+const CHIRP_DURATION_MS = 5;
 const SAMPLE_RATE = 48000;
+const CHIRP_SAMPLES = Math.floor(SAMPLE_RATE * CHIRP_DURATION_MS / 1000); // 240
 
 const connectBtn = document.getElementById('connect-btn');
 const testBtn = document.getElementById('test-btn');
@@ -196,40 +198,56 @@ function setTransportBadge(mode) {
   transportBadge.textContent = mode === 'webtransport' ? 'WebTransport' : 'WebRTC (fallback)';
 }
 
-// AudioWorklet code for chirp detection (runs on audio thread)
-const detectorWorkletCode = `
+// AudioWorklet code for chirp detection via NCC (runs on audio thread)
+// Template and energy are injected as constants at worklet creation time.
+function makeDetectorWorkletCode() {
+  const { template, energy } = generateChirpTemplate();
+  const templateStr = '[' + Array.from(template).map(v => v.toFixed(8)).join(',') + ']';
+  return `
 class ChirpDetectorProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.threshold = 0.02;  // Lower threshold for detecting returned chirp
+    this.chirp = new Float32Array(${templateStr});
+    this.chirpLen = ${CHIRP_SAMPLES};
+    this.chirpEnergy = ${energy};
+    this.corrThreshold = 0.4;
     this.cooldown = 0;
-    this.cooldownFrames = 48000 * 0.3; // 300ms cooldown
-    this.baseline = 0;
+    this.cooldownFrames = 48000 * 0.3; // 300ms
+    this.prevFrame = new Float32Array(0);
     this.sampleCount = 0;
-    this.reportInterval = 48000 / 4; // Report every 250ms
+    this.reportInterval = 48000 / 4;
+    this.maxCorr = 0;
+  }
+
+  crossCorrelate(buffer) {
+    const positions = buffer.length - this.chirpLen + 1;
+    if (positions <= 0) return { corr: -1, pos: -1 };
+    let bestCorr = -1, bestPos = -1;
+    for (let offset = 0; offset < positions; offset++) {
+      let cross = 0, sigEnergy = 0;
+      for (let i = 0; i < this.chirpLen; i++) {
+        cross += buffer[offset + i] * this.chirp[i];
+        sigEnergy += buffer[offset + i] * buffer[offset + i];
+      }
+      const denom = Math.sqrt(this.chirpEnergy * sigEnergy);
+      const ncc = denom > 1e-10 ? cross / denom : 0;
+      if (ncc > bestCorr) { bestCorr = ncc; bestPos = offset; }
+    }
+    return { corr: bestCorr, pos: bestPos };
   }
 
   process(inputs, outputs) {
     const input = inputs[0][0];
     if (!input) return true;
 
-    // Calculate RMS energy
-    let energy = 0;
-    for (let i = 0; i < input.length; i++) {
-      energy += input[i] * input[i];
-    }
-    energy = Math.sqrt(energy / input.length);
-
-    // Update baseline (exponential moving average)
-    this.baseline = this.baseline * 0.99 + energy * 0.01;
-
-    // Report levels periodically for debugging
     this.sampleCount += input.length;
     if (this.sampleCount >= this.reportInterval) {
+      let energy = 0;
+      for (let i = 0; i < input.length; i++) energy += input[i] * input[i];
+      energy = Math.sqrt(energy / input.length);
       this.port.postMessage({
         level: energy.toFixed(4),
-        baseline: this.baseline.toFixed(4),
-        threshold: this.threshold
+        maxCorr: this.maxCorr.toFixed(4)
       });
       this.sampleCount = 0;
     }
@@ -239,18 +257,34 @@ class ChirpDetectorProcessor extends AudioWorkletProcessor {
       return true;
     }
 
-    // Detect if energy is significantly above baseline
-    const spike = energy > this.threshold && energy > this.baseline * 3;
-    if (spike) {
-      this.port.postMessage({ detected: true, energy: energy.toFixed(4) });
+    // Build combined buffer: prevFrame + current frame
+    const combined = new Float32Array(this.prevFrame.length + input.length);
+    combined.set(this.prevFrame, 0);
+    combined.set(input, this.prevFrame.length);
+
+    const { corr, pos } = this.crossCorrelate(combined);
+    if (corr > this.maxCorr) this.maxCorr = corr;
+
+    if (corr >= this.corrThreshold && pos >= 0) {
+      // Compute sample-accurate detection time using AudioContext currentTime.
+      // currentTime is the time of the first sample in this process() call.
+      // peakPos is relative to combined = [prevFrame | input].
+      // Samples into the current frame where peak starts:
+      const posInCurrentFrame = pos - this.prevFrame.length;
+      // If peak is in prevFrame, offset is negative (detected late)
+      const sampleOffset = Math.max(0, posInCurrentFrame);
+      const detectionTime = currentTime + sampleOffset / ${SAMPLE_RATE};
+      this.port.postMessage({ detected: true, corr: corr.toFixed(4), peakPos: pos, detectionTime });
       this.cooldown = this.cooldownFrames;
     }
 
+    this.prevFrame = new Float32Array(input);
     return true;
   }
 }
 registerProcessor('chirp-detector', ChirpDetectorProcessor);
 `;
+}
 
 function setStatus(text, btnClass) {
   statusEl.textContent = text;
@@ -277,7 +311,7 @@ async function connect() {
     if (audioCtx.state === 'suspended') await audioCtx.resume();
 
     // Load detector worklet
-    const blob = new Blob([detectorWorkletCode], { type: 'application/javascript' });
+    const blob = new Blob([makeDetectorWorkletCode()], { type: 'application/javascript' });
     const url = URL.createObjectURL(blob);
     await audioCtx.audioWorklet.addModule(url);
     URL.revokeObjectURL(url);
@@ -352,13 +386,12 @@ async function connectWebTransport() {
   detectorWorklet.port.onmessage = (e) => {
     const debugEl = document.getElementById('debug');
     if (e.data.level !== undefined) {
-      debugEl.textContent = `[WT] RX level: ${e.data.level} | baseline: ${e.data.baseline}`;
+      debugEl.textContent = `[WT] RX level: ${e.data.level} | maxCorr: ${e.data.maxCorr}`;
     }
     if (e.data.detected) {
-      console.log('Chirp detected via WebTransport, energy:', e.data.energy);
+      console.log('Chirp detected via WebTransport, corr:', e.data.corr, 'detectionTime:', e.data.detectionTime);
       if (isMeasuring) {
-        const now = performance.now();
-        const latency = now - chirpSentTime;
+        const latency = e.data.detectionTime - chirpSentTime;
         onChirpDetected(latency);
       }
     }
@@ -366,6 +399,7 @@ async function connectWebTransport() {
 
   // Read datagrams: audio (>8 bytes) goes to detector, ping echoes (==8 bytes) to RTT tracker
   const reader = wt.datagrams.readable.getReader();
+  let prevPcmRecvTime = 0;
   (async () => {
     try {
       while (true) {
@@ -385,9 +419,14 @@ async function connectWebTransport() {
           continue;
         }
         if (value.byteLength < 9) continue; // malformed audio datagram
-        // Strip 8-byte header (seq + timestamp), send PCM payload
+        // Strip 8-byte header (seq + timestamp), send PCM payload with receive timestamp
+        const recvTime = performance.now();
         const pcmBytes = value.slice(8);
-        detectorWorklet.port.postMessage(pcmBytes, [pcmBytes.buffer]);
+        detectorWorklet.port.postMessage(
+          { pcm: pcmBytes, recvTime, prevRecvTime: prevPcmRecvTime },
+          [pcmBytes.buffer]
+        );
+        prevPcmRecvTime = recvTime;
       }
     } catch (e) {
       console.error('Datagram read error:', e);
@@ -421,38 +460,41 @@ async function connectWebTransport() {
 }
 
 function createPcmDetectorWorkletCode() {
+  const { template, energy } = generateChirpTemplate();
+  const templateStr = '[' + Array.from(template).map(v => v.toFixed(8)).join(',') + ']';
   return `
 class PcmChirpDetectorProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.threshold = 0.02;
+    this.chirp = new Float32Array(${templateStr});
+    this.chirpLen = ${CHIRP_SAMPLES};
+    this.chirpEnergy = ${energy};
+    this.corrThreshold = 0.4;
     this.cooldown = 0;
     this.cooldownFrames = 48000 * 0.3;
-    this.baseline = 0;
+    this.prevFrame = new Float32Array(0);
     this.sampleCount = 0;
     this.reportInterval = 48000 / 4;
+    this.maxCorr = 0;
 
     this.port.onmessage = (e) => {
-      // Received raw PCM i16 little-endian bytes
-      const bytes = new Uint8Array(e.data);
-      const samples = new Int16Array(bytes.buffer);
-
-      // Calculate energy
-      let energy = 0;
-      for (let i = 0; i < samples.length; i++) {
-        const f = samples[i] / 32768.0;
-        energy += f * f;
+      // e.data = { pcm: Uint8Array, recvTime: number, prevRecvTime: number }
+      const msg = e.data;
+      const bytes = new Uint8Array(msg.pcm);
+      const i16 = new Int16Array(bytes.buffer);
+      const samples = new Float32Array(i16.length);
+      for (let i = 0; i < i16.length; i++) {
+        samples[i] = i16[i] / 32768.0;
       }
-      energy = Math.sqrt(energy / samples.length);
-
-      // Update baseline
-      this.baseline = this.baseline * 0.99 + energy * 0.01;
 
       this.sampleCount += samples.length;
       if (this.sampleCount >= this.reportInterval) {
+        let energy = 0;
+        for (let i = 0; i < samples.length; i++) energy += samples[i] * samples[i];
+        energy = Math.sqrt(energy / samples.length);
         this.port.postMessage({
           level: energy.toFixed(4),
-          baseline: this.baseline.toFixed(4)
+          maxCorr: this.maxCorr.toFixed(4)
         });
         this.sampleCount = 0;
       }
@@ -462,16 +504,54 @@ class PcmChirpDetectorProcessor extends AudioWorkletProcessor {
         return;
       }
 
-      const spike = energy > this.threshold && energy > this.baseline * 3;
-      if (spike) {
-        this.port.postMessage({ detected: true, energy: energy.toFixed(4) });
+      // Build combined buffer: prevFrame + current frame
+      const prevLen = this.prevFrame.length;
+      const combined = new Float32Array(prevLen + samples.length);
+      combined.set(this.prevFrame, 0);
+      combined.set(samples, prevLen);
+
+      const { corr, pos } = this.crossCorrelate(combined);
+      if (corr > this.maxCorr) this.maxCorr = corr;
+
+      if (corr >= this.corrThreshold && pos >= 0) {
+        // Compute sample-accurate detection time.
+        // Peak is at position 'pos' in [prevFrame | currentFrame].
+        let detectionTime;
+        if (pos >= prevLen) {
+          // Peak is in current frame
+          const offsetInFrame = pos - prevLen;
+          detectionTime = msg.recvTime - (samples.length - offsetInFrame) / ${SAMPLE_RATE} * 1000;
+        } else {
+          // Peak is in previous frame
+          detectionTime = msg.prevRecvTime - (prevLen - pos) / ${SAMPLE_RATE} * 1000;
+        }
+        this.port.postMessage({ detected: true, corr: corr.toFixed(4), peakPos: pos, detectionTime });
         this.cooldown = this.cooldownFrames;
       }
+
+      this.prevFrame = new Float32Array(samples);
+      this.prevRecvTime = msg.recvTime;
     };
   }
 
+  crossCorrelate(buffer) {
+    const positions = buffer.length - this.chirpLen + 1;
+    if (positions <= 0) return { corr: -1, pos: -1 };
+    let bestCorr = -1, bestPos = -1;
+    for (let offset = 0; offset < positions; offset++) {
+      let cross = 0, sigEnergy = 0;
+      for (let i = 0; i < this.chirpLen; i++) {
+        cross += buffer[offset + i] * this.chirp[i];
+        sigEnergy += buffer[offset + i] * buffer[offset + i];
+      }
+      const denom = Math.sqrt(this.chirpEnergy * sigEnergy);
+      const ncc = denom > 1e-10 ? cross / denom : 0;
+      if (ncc > bestCorr) { bestCorr = ncc; bestPos = offset; }
+    }
+    return { corr: bestCorr, pos: bestPos };
+  }
+
   process(inputs, outputs) {
-    // No processing needed - we handle data via port messages
     return true;
   }
 }
@@ -512,13 +592,14 @@ async function connectWebRTC() {
     detectorWorklet.port.onmessage = (e) => {
       const debugEl = document.getElementById('debug');
       if (e.data.level !== undefined) {
-        debugEl.textContent = `[WebRTC] RX level: ${e.data.level} | baseline: ${e.data.baseline} | threshold: ${e.data.threshold}`;
+        debugEl.textContent = `[WebRTC] RX level: ${e.data.level} | maxCorr: ${e.data.maxCorr}`;
       }
       if (e.data.detected) {
-        console.log('Chirp detected, energy:', e.data.energy);
+        console.log('Chirp detected via WebRTC, corr:', e.data.corr, 'detectionTime:', e.data.detectionTime);
         if (isMeasuring) {
-          const now = performance.now();
-          const latency = now - chirpSentTime;
+          // Convert AudioContext detectionTime to latency using the baseline
+          // established at chirp send time.
+          const latency = (e.data.detectionTime - chirpSentAudioTime) * 1000;
           onChirpDetected(latency);
         }
       }
@@ -580,19 +661,59 @@ function disconnect() {
 }
 
 function generateChirp() {
-  const numSamples = Math.floor(SAMPLE_RATE * CHIRP_DURATION);
-  const buffer = audioCtx.createBuffer(1, numSamples, SAMPLE_RATE);
+  // Matches Android chirp_tester.cpp exactly
+  const buffer = audioCtx.createBuffer(1, CHIRP_SAMPLES, SAMPLE_RATE);
   const data = buffer.getChannelData(0);
+  const rampSamples = Math.floor(SAMPLE_RATE / 1000); // 48 samples = 1ms
 
-  for (let i = 0; i < numSamples; i++) {
+  for (let i = 0; i < CHIRP_SAMPLES; i++) {
     const t = i / SAMPLE_RATE;
-    const freq = CHIRP_FREQ_START + (CHIRP_FREQ_END - CHIRP_FREQ_START) * (t / CHIRP_DURATION);
-    // Envelope to avoid clicks
-    const env = Math.sin(Math.PI * i / numSamples);
-    data[i] = Math.sin(2 * Math.PI * freq * t) * env * 0.8;
+    const progress = i / CHIRP_SAMPLES;
+
+    // Linear frequency sweep (integrated phase, same as Android)
+    const phase = 2 * Math.PI * (CHIRP_FREQ_START * t +
+                  0.5 * (CHIRP_FREQ_END - CHIRP_FREQ_START) * t * progress);
+
+    // Linear ramp envelope (matches Android)
+    let envelope = 1.0;
+    if (i < rampSamples) {
+      envelope = i / rampSamples;
+    } else if (i > CHIRP_SAMPLES - rampSamples) {
+      envelope = (CHIRP_SAMPLES - i) / rampSamples;
+    }
+
+    data[i] = Math.sin(phase) * envelope;
   }
 
   return buffer;
+}
+
+// Pre-generate chirp template as Float32Array for NCC detection
+function generateChirpTemplate() {
+  const template = new Float32Array(CHIRP_SAMPLES);
+  const rampSamples = Math.floor(SAMPLE_RATE / 1000);
+
+  for (let i = 0; i < CHIRP_SAMPLES; i++) {
+    const t = i / SAMPLE_RATE;
+    const progress = i / CHIRP_SAMPLES;
+    const phase = 2 * Math.PI * (CHIRP_FREQ_START * t +
+                  0.5 * (CHIRP_FREQ_END - CHIRP_FREQ_START) * t * progress);
+    let envelope = 1.0;
+    if (i < rampSamples) {
+      envelope = i / rampSamples;
+    } else if (i > CHIRP_SAMPLES - rampSamples) {
+      envelope = (CHIRP_SAMPLES - i) / rampSamples;
+    }
+    template[i] = Math.sin(phase) * envelope;
+  }
+
+  // Precompute energy
+  let energy = 0;
+  for (let i = 0; i < CHIRP_SAMPLES; i++) {
+    energy += template[i] * template[i];
+  }
+
+  return { template, energy };
 }
 
 async function runTest() {
@@ -609,6 +730,7 @@ async function runTest() {
   source.connect(audioCtx.destination);
 
   chirpSentTime = performance.now();
+  chirpSentAudioTime = audioCtx.currentTime;
   source.start();
 
   // Timeout after 2 seconds
