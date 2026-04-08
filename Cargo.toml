@@ -58,20 +58,15 @@ png = "0.18.1"
 anyhow = "1"
 socket2 = "0.5"
 base64 = "0.22"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18"
+bytes = "1"
+ringbuf = "0.4"
 
 # mDNS service advertisement
 mdns-sd = "0.11"
 hostname = "0.4"
 
-# Utilities
-anyhow = "1"
-bytes = "1"
-ringbuf = "0.4"
-base64 = "0.22"
-socket2 = "0.5"
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
