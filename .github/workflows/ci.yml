@@ -77,6 +77,12 @@ jobs:
       - name: Build debug APK
         working-directory: android
         run: ./gradlew assembleDebug
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: whcanrc-assisted-listening-android-debug
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 7
 
   build-linux:
     name: Build Release (Linux)
@@ -98,6 +104,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: whcanrc-assisted-listening-linux-x86_64
+          retention-days: 7
           path: |
             whcanrc-assisted-listening-linux-x86_64
             whcanrc-assisted-listening-linux-x86_64.tar.gz
@@ -119,4 +126,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: whcanrc-assisted-listening-windows-x86_64
+          retention-days: 7
           path: whcanrc-assisted-listening-windows-x86_64.exe
