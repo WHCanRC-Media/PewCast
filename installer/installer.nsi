@@ -4,6 +4,7 @@ Name "WHCanRC Assisted Listening"
 OutFile "whcanrc-assisted-listening-setup.exe"
 InstallDir "$PROGRAMFILES\WHCanRC Assisted Listening"
 RequestExecutionLevel admin
+SetShellVarContext current
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -26,15 +27,16 @@ Section "Install"
     IfFileExists "$INSTDIR\config.toml" +2
     File "/oname=config.toml" "..\config.toml.example"
 
-    ; Install and start the Windows Service
-    nsExec::ExecToLog '"$INSTDIR\whcanrc-assisted-listening.exe" --install-service'
-
-    ; Add firewall rule
+    ; Add firewall rules
     nsExec::ExecToLog 'netsh advfirewall firewall add rule name="WHCanRC Assisted Listening" dir=in action=allow protocol=TCP localport=8080'
     nsExec::ExecToLog 'netsh advfirewall firewall add rule name="WHCanRC Assisted Listening UDP" dir=in action=allow protocol=UDP localport=8080'
 
-    ; Start the service
-    nsExec::ExecToLog 'sc start WHCanRCAssistedListening'
+    ; Create Start Menu shortcut
+    CreateDirectory "$SMPROGRAMS\WHCanRC Assisted Listening"
+    CreateShortCut "$SMPROGRAMS\WHCanRC Assisted Listening\WHCanRC Assisted Listening.lnk" "$INSTDIR\whcanrc-assisted-listening.exe"
+
+    ; Run on startup
+    CreateShortCut "$SMSTARTUP\WHCanRC Assisted Listening.lnk" "$INSTDIR\whcanrc-assisted-listening.exe"
 
     ; Create uninstaller
     WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -46,9 +48,10 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
-    ; Stop and remove the service
-    nsExec::ExecToLog 'sc stop WHCanRCAssistedListening'
-    nsExec::ExecToLog 'sc delete WHCanRCAssistedListening'
+    ; Remove shortcuts
+    Delete "$SMSTARTUP\WHCanRC Assisted Listening.lnk"
+    Delete "$SMPROGRAMS\WHCanRC Assisted Listening\WHCanRC Assisted Listening.lnk"
+    RMDir "$SMPROGRAMS\WHCanRC Assisted Listening"
 
     ; Remove firewall rules
     nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="WHCanRC Assisted Listening"'
