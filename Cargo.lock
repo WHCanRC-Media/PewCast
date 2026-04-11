@@ -3451,6 +3451,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spin_sleep"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c07347b7c0301b9adba4350bdcf09c039d0e7160922050db0439b3c6723c8ab"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "spki"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4449,6 +4458,7 @@ dependencies = [
  "dirs",
  "gtk",
  "hostname",
+ "libc",
  "mdns-sd",
  "muda",
  "nu-ansi-term",
@@ -4460,6 +4470,7 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2 0.5.10",
+ "spin_sleep",
  "tokio",
  "toml 0.8.2",
  "tower-http",

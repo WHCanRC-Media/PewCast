@@ -51,6 +51,7 @@ private data class JoinResult(val clientId: String, val udpPort: Int)
 @Composable
 fun LatencyTestScreen(
     serverAddress: String,
+    autoRunCount: Int = 0,
     onNavigateBack: () -> Unit
 ) {
     val tester = remember { ChirpTester() }
@@ -67,6 +68,11 @@ fun LatencyTestScreen(
     var packetsLost by remember { mutableIntStateOf(0) }
     var outputLatencyMs by remember { mutableStateOf(-1.0) }
     var reportStatus by remember { mutableStateOf("") }
+
+    // Extract server IP (strip port) for native UDP
+    val serverIp = remember(serverAddress) {
+        serverAddress.substringBefore(":")
+    }
 
     // Poll for results
     LaunchedEffect(isRunning) {
@@ -108,6 +114,66 @@ fun LatencyTestScreen(
         }
     }
 
+    // Auto-run mode: run N chirps automatically when launched from automation intent
+    LaunchedEffect(autoRunCount) {
+        if (autoRunCount <= 0) return@LaunchedEffect
+
+        Log.i(TAG, "LATENCY_AUTORUN: starting $autoRunCount tests against $serverAddress")
+        delay(500) // let UI render
+
+        // Discover the server's UDP port once upfront, reuse for all chirps
+        val discoverResult = withContext(Dispatchers.IO) { httpJoin(serverAddress, 0) }
+        if (discoverResult == null) {
+            Log.e(TAG, "LATENCY_SUMMARY: 0 ok, $autoRunCount timeout (failed to discover UDP port)")
+            return@LaunchedEffect
+        }
+        withContext(Dispatchers.IO) { httpLeave(serverAddress, discoverResult.clientId) }
+        val cachedUdpPort = discoverResult.udpPort
+
+        var timeouts = 0
+        for (i in 1..autoRunCount) {
+            val result = runOneChirp(tester, serverAddress, serverIp, cachedUdpPort)
+            if (result > 0) {
+                results = results + result
+                Log.i(TAG, "LATENCY_RESULT: ${result}ms")
+            } else {
+                timeouts++
+                Log.i(TAG, "LATENCY_RESULT: timeout")
+            }
+            // Grab diagnostics after each chirp
+            pingRtts = tester.getPingRttUs()
+            packetsReceived = tester.getPacketsReceived()
+            packetsLost = tester.getPacketsLost()
+            outputLatencyMs = tester.getOutputLatencyMs()
+            delay(1000) // pause between chirps
+        }
+
+        // Log summary
+        if (results.isNotEmpty()) {
+            val sorted = results.sorted()
+            val avg = results.average().toInt()
+            val min = sorted.first()
+            val max = sorted.last()
+            val p50 = sorted[sorted.size / 2]
+            Log.i(TAG, "LATENCY_SUMMARY: ${results.size} ok, $timeouts timeout, avg=${avg}ms, min=${min}ms, p50=${p50}ms, max=${max}ms")
+        } else {
+            Log.i(TAG, "LATENCY_SUMMARY: 0 ok, $timeouts timeout")
+        }
+
+        // Auto-send report
+        withContext(Dispatchers.IO) {
+            sendReport(
+                serverAddress = serverAddress,
+                chirpRtts = results.map { it.toDouble() },
+                pingRttsUs = pingRtts.toList(),
+                packetsReceived = packetsReceived,
+                packetsLost = packetsLost,
+                outputLatencyMs = outputLatencyMs
+            )
+        }
+        Log.i(TAG, "LATENCY_DONE")
+    }
+
     // Result display color
     val resultColor by animateColorAsState(
         targetValue = when {
@@ -128,11 +194,6 @@ fun LatencyTestScreen(
             repeatMode = RepeatMode.Reverse
         ), label = "pulseAlpha"
     )
-
-    // Extract server IP (strip port) for native UDP
-    val serverIp = remember(serverAddress) {
-        serverAddress.substringBefore(":")
-    }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -419,6 +480,55 @@ private fun StatRow(label: String, value: String) {
         Text(text = label, fontSize = 12.sp, color = DimText)
         Text(text = value, fontSize = 12.sp, fontFamily = FontFamily.Monospace, color = Color(0xFFCCCCCC))
     }
+}
+
+// --- Chirp automation helper ---
+
+/** Run a single chirp test and return latency in ms, or -2 on timeout/error. */
+private suspend fun runOneChirp(
+    tester: ChirpTester,
+    serverAddress: String,
+    serverIp: String,
+    cachedUdpPort: Int = 0,
+): Int {
+    val udpPort = if (cachedUdpPort > 0) {
+        cachedUdpPort
+    } else {
+        // Discover UDP port if not cached
+        val discoverResult = withContext(Dispatchers.IO) { httpJoin(serverAddress, 0) }
+            ?: return -2
+        withContext(Dispatchers.IO) { httpLeave(serverAddress, discoverResult.clientId) }
+        discoverResult.udpPort
+    }
+
+    // Start test (binds socket, starts ping probes)
+    if (!tester.startTest(serverIp, udpPort, 0)) return -2
+
+    // Join with actual listen port so server sends audio to us
+    val listenPort = tester.getListenPort()
+    val joinResult = withContext(Dispatchers.IO) { httpJoin(serverAddress, listenPort) }
+    if (joinResult == null) {
+        tester.stopTest()
+        return -2
+    }
+
+    // Wait for audio packets to start flowing, then play chirp
+    delay(200)
+    tester.playChirp()
+
+    // Poll for result (timeout after 5s)
+    val deadline = System.currentTimeMillis() + 5000
+    var result = -1
+    while (System.currentTimeMillis() < deadline) {
+        result = tester.getLatencyMs()
+        if (result != -1) break
+        delay(50)
+    }
+
+    tester.stopTest()
+    withContext(Dispatchers.IO) { httpLeave(serverAddress, joinResult.clientId) }
+
+    return if (result == -1) -2 else result
 }
 
 // --- HTTP helpers ---

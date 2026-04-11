@@ -57,6 +57,7 @@ nu-ansi-term = "0.50.3"
 png = "0.18.1"
 anyhow = "1"
 socket2 = "0.5"
+spin_sleep = "1"
 base64 = "0.22"
 bytes = "1"
 ringbuf = "0.4"
@@ -67,6 +68,7 @@ hostname = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
