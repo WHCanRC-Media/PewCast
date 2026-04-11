@@ -80,12 +80,6 @@ jobs:
       - name: Build debug APK
         working-directory: android
         run: ./gradlew assembleDebug
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: whcanrc-assisted-listening-android-debug
-          path: android/app/build/outputs/apk/debug/*.apk
-          retention-days: 7
 
   build-linux:
     name: Build Release (Linux)
@@ -100,18 +94,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libgtk-3-dev
       - name: Build release
         run: cargo build --release
-      - name: Package binary
-        run: |
-          cp target/release/whcanrc-assisted-listening whcanrc-assisted-listening-linux-x86_64
-          tar czf whcanrc-assisted-listening-linux-x86_64.tar.gz whcanrc-assisted-listening-linux-x86_64 static/
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: whcanrc-assisted-listening-linux-x86_64
-          retention-days: 7
-          path: |
-            whcanrc-assisted-listening-linux-x86_64
-            whcanrc-assisted-listening-linux-x86_64.tar.gz
 
   build-windows:
     name: Build Release (Windows)
@@ -124,12 +106,3 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build release
         run: cargo build --release
-      - name: Package binary
-        run: |
-          copy target\release\whcanrc-assisted-listening.exe whcanrc-assisted-listening-windows-x86_64.exe
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: whcanrc-assisted-listening-windows-x86_64
-          retention-days: 7
-          path: whcanrc-assisted-listening-windows-x86_64.exe
