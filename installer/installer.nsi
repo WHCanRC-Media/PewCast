@@ -4,7 +4,6 @@ Name "WHCanRC Assisted Listening"
 OutFile "whcanrc-assisted-listening-setup.exe"
 InstallDir "$PROGRAMFILES\WHCanRC Assisted Listening"
 RequestExecutionLevel admin
-SetShellVarContext current
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -17,6 +16,7 @@ SetShellVarContext current
 !insertmacro MUI_LANGUAGE "English"
 
 Section "Install"
+    SetShellVarContext current
     SetOutPath $INSTDIR
 
     ; Copy the binary
@@ -48,6 +48,7 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
+    SetShellVarContext current
     ; Remove shortcuts
     Delete "$SMSTARTUP\WHCanRC Assisted Listening.lnk"
     Delete "$SMPROGRAMS\WHCanRC Assisted Listening\WHCanRC Assisted Listening.lnk"
