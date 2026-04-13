@@ -1,0 +1,19 @@
+# Rust
+/target/
+/listener/
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/.idea/
+android/local.properties
+
+# Local config
+/config.toml
+
+# Secrets — never commit
+*.jks
+*.keystore
+signing.env

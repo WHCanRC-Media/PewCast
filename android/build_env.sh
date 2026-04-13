@@ -27,6 +27,13 @@ export ANDROID_SDK_ROOT="$ANDROID_HOME"
 export JAVA_HOME="/usr/lib/jvm/java-21-openjdk-amd64"
 export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
 
+# Load release signing credentials if present (required for assembleRelease)
+if [[ -f "$HOME/.config/pewcast/signing.env" ]]; then
+    set -a
+    source "$HOME/.config/pewcast/signing.env"
+    set +a
+fi
+
 #echo "Android build environment configured:"
 #echo "  JAVA_HOME=$JAVA_HOME"
 #echo "  ANDROID_HOME=$ANDROID_HOME"

@@ -4,6 +4,28 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val signingEnv = mapOf(
+    "PEWCAST_KEYSTORE" to System.getenv("PEWCAST_KEYSTORE"),
+    "PEWCAST_KEYSTORE_PASSWORD" to System.getenv("PEWCAST_KEYSTORE_PASSWORD"),
+    "PEWCAST_KEY_ALIAS" to System.getenv("PEWCAST_KEY_ALIAS"),
+    "PEWCAST_KEY_PASSWORD" to System.getenv("PEWCAST_KEY_PASSWORD"),
+)
+val hasSigningEnv = signingEnv.values.all { !it.isNullOrBlank() }
+
+gradle.taskGraph.whenReady {
+    val wantsRelease = allTasks.any { t ->
+        t.name.contains("Release") &&
+            (t.name.startsWith("assemble") || t.name.startsWith("bundle") || t.name.startsWith("package"))
+    }
+    if (wantsRelease && !hasSigningEnv) {
+        val missing = signingEnv.filter { it.value.isNullOrBlank() }.keys
+        throw GradleException(
+            "Release build requires signing env vars. Missing: ${missing.joinToString(", ")}. " +
+                "Set them (e.g. source ~/.config/pewcast/signing.env) before running assembleRelease."
+        )
+    }
+}
+
 // Generate launcher icons from source PNG
 tasks.register("generateIcons") {
     val sourceIcon = rootProject.file("../icon.png")
@@ -65,6 +87,17 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            if (hasSigningEnv) {
+                storeFile = file(signingEnv["PEWCAST_KEYSTORE"]!!)
+                storePassword = signingEnv["PEWCAST_KEYSTORE_PASSWORD"]
+                keyAlias = signingEnv["PEWCAST_KEY_ALIAS"]
+                keyPassword = signingEnv["PEWCAST_KEY_PASSWORD"]
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -72,6 +105,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
