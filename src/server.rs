@@ -165,12 +165,28 @@ async fn ice_candidate_handler(
 struct StatusResponse {
     status: String,
     active_peers: usize,
+    /// SHA of the last commit touching `android/`, stamped at server build time.
+    /// `"unknown"` if git was unavailable during the build.
+    apk_git_sha: &'static str,
+    /// Count of commits touching `android/` up to HEAD at server build time.
+    /// Monotonic on a branch — the app uses this to detect when the server
+    /// knows of a newer APK than the one installed. `0` if git was unavailable.
+    apk_commit_count: u32,
+    /// Always points to the latest release's APK via GitHub's redirect.
+    apk_download_url: &'static str,
 }
+
+const APK_GIT_SHA: &str = env!("APK_GIT_SHA");
+const APK_DOWNLOAD_URL: &str =
+    "https://github.com/WHCanRC-Media/WHCanRC_Assisted_Listening/releases/latest/download/pewcast-android.apk";
 
 async fn status_handler(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
     Json(StatusResponse {
         status: "running".to_string(),
         active_peers: state.peer_manager.peer_count().await,
+        apk_git_sha: APK_GIT_SHA,
+        apk_commit_count: env!("APK_COMMIT_COUNT").parse().unwrap_or(0),
+        apk_download_url: APK_DOWNLOAD_URL,
     })
 }
 

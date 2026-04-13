@@ -56,6 +56,25 @@ tasks.named("preBuild") {
     dependsOn("generateIcons")
 }
 
+// Stamp the APK with the git identity of the android/ tree so the app can
+// compare against the server's /status response. Falls back to "unknown" / 0
+// when git is unavailable (e.g., building from an unpacked tarball).
+fun runGit(vararg args: String): String? {
+    return try {
+        val p = ProcessBuilder(listOf("git") + args.toList())
+            .directory(rootProject.projectDir.parentFile)
+            .redirectErrorStream(false)
+            .start()
+        val out = p.inputStream.bufferedReader().readText().trim()
+        if (p.waitFor() == 0 && out.isNotEmpty()) out else null
+    } catch (_: Exception) {
+        null
+    }
+}
+
+val apkGitSha: String = runGit("log", "-1", "--format=%H", "--", "android") ?: "unknown"
+val apkCommitCount: Int = runGit("rev-list", "--count", "HEAD", "--", "android")?.toIntOrNull() ?: 0
+
 android {
     namespace = "org.whcanrc.pewcast"
     compileSdk = 35
@@ -67,6 +86,9 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+
+        buildConfigField("String", "APK_GIT_SHA", "\"$apkGitSha\"")
+        buildConfigField("int", "APK_COMMIT_COUNT", "$apkCommitCount")
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -120,6 +142,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

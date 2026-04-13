@@ -1,10 +1,13 @@
 package org.whcanrc.pewcast.ui
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 import android.util.Log
+import org.whcanrc.pewcast.BuildConfig
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
@@ -47,6 +50,8 @@ private const val SERVICE_TYPE = "_pewcast._tcp."
 
 private data class DiscoveredServer(val name: String, val address: String)
 
+private data class UpdateInfo(val serverCount: Int, val downloadUrl: String)
+
 // Colors matching the web UI
 private val BlueAccent = Color(0xFF4A90D9)
 private val GreenLive = Color(0xFF4CAF50)
@@ -77,6 +82,12 @@ fun ListeningScreen(
             setReferenceCounted(false)
         }
     }
+
+    // Update check: populated when server reports a newer apk_commit_count than this APK.
+    // Cleared after the user dismisses ("Later") so we don't re-prompt during the session.
+    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+    var updatePromptDismissed by remember { mutableStateOf(false) }
+    var updateChecked by remember { mutableStateOf(false) }
 
     // mDNS
     var discoveredServers by remember { mutableStateOf<List<DiscoveredServer>>(emptyList()) }
@@ -120,6 +131,56 @@ fun ListeningScreen(
             }
             try { nsdManager.stopServiceDiscovery(listener) } catch (_: Exception) {}
         }
+    }
+
+    // Check once per session for an APK update. Requires a known server address
+    // (typically from mDNS discovery). Skips silently if anything is unknown.
+    LaunchedEffect(serverAddress) {
+        if (updateChecked || serverAddress.isBlank()) return@LaunchedEffect
+        if (BuildConfig.APK_COMMIT_COUNT == 0 || BuildConfig.APK_GIT_SHA == "unknown") {
+            Log.i(TAG, "Update check skipped: this APK has no git identity")
+            return@LaunchedEffect
+        }
+        val info = withContext(Dispatchers.IO) { fetchServerStatus(serverAddress) }
+        updateChecked = true
+        if (info == null) return@LaunchedEffect
+        Log.i(TAG, "Update check: app count=${BuildConfig.APK_COMMIT_COUNT} sha=${BuildConfig.APK_GIT_SHA.take(8)}, server count=${info.apkCommitCount} sha=${info.apkGitSha.take(8)}")
+        if (info.apkCommitCount > 0 && info.apkCommitCount > BuildConfig.APK_COMMIT_COUNT) {
+            updateInfo = UpdateInfo(
+                serverCount = info.apkCommitCount,
+                downloadUrl = info.apkDownloadUrl,
+            )
+        }
+    }
+
+    // Show update prompt when available and not dismissed.
+    val pendingUpdate = updateInfo
+    if (pendingUpdate != null && !updatePromptDismissed) {
+        AlertDialog(
+            onDismissRequest = { updatePromptDismissed = true },
+            title = { Text("Update available") },
+            text = {
+                Text(
+                    "A newer version of PewCast is available. " +
+                        "Installed: ${BuildConfig.APK_COMMIT_COUNT} · Available: ${pendingUpdate.serverCount}."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(pendingUpdate.downloadUrl))
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    try {
+                        context.startActivity(intent)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to open update URL: $e")
+                    }
+                    updatePromptDismissed = true
+                }) { Text("Update") }
+            },
+            dismissButton = {
+                TextButton(onClick = { updatePromptDismissed = true }) { Text("Later") }
+            },
+        )
     }
 
     // Stats
@@ -524,6 +585,40 @@ private fun openConnection(url: URL): HttpURLConnection {
         conn.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
     }
     return conn
+}
+
+private data class ServerStatus(
+    val apkGitSha: String,
+    val apkCommitCount: Int,
+    val apkDownloadUrl: String,
+)
+
+private fun fetchServerStatus(serverAddress: String): ServerStatus? {
+    return try {
+        val url = URL("https://$serverAddress/status")
+        val conn = openConnection(url).apply {
+            requestMethod = "GET"
+            connectTimeout = 3000
+            readTimeout = 3000
+        }
+        if (conn.responseCode != 200) {
+            Log.w(TAG, "Status fetch: HTTP ${conn.responseCode}")
+            return null
+        }
+        val json = JSONObject(conn.inputStream.bufferedReader().readText())
+        // Older servers (pre-update-check) won't include these fields; treat missing as unknown.
+        if (!json.has("apk_commit_count") || !json.has("apk_git_sha") || !json.has("apk_download_url")) {
+            return null
+        }
+        ServerStatus(
+            apkGitSha = json.getString("apk_git_sha"),
+            apkCommitCount = json.getInt("apk_commit_count"),
+            apkDownloadUrl = json.getString("apk_download_url"),
+        )
+    } catch (e: Exception) {
+        Log.w(TAG, "Status fetch error: $e")
+        null
+    }
 }
 
 private fun httpJoin(serverAddress: String, listenPort: Int): String? {
