@@ -45,26 +45,26 @@ impl Config {
             Config::default()
         };
 
-        // Apply environment variable overrides (WHCANRC_ prefix)
-        if let Ok(val) = std::env::var("WHCANRC_PORT") {
+        // Apply environment variable overrides (PEWCAST_ prefix)
+        if let Ok(val) = std::env::var("PEWCAST_PORT") {
             config.port = val.parse()?;
         }
-        if let Ok(val) = std::env::var("WHCANRC_LOG_LEVEL") {
+        if let Ok(val) = std::env::var("PEWCAST_LOG_LEVEL") {
             config.log_level = val;
         }
-        if let Ok(val) = std::env::var("WHCANRC_AUDIO_SAMPLE_RATE") {
+        if let Ok(val) = std::env::var("PEWCAST_AUDIO_SAMPLE_RATE") {
             config.audio_sample_rate = val.parse()?;
         }
-        if let Ok(val) = std::env::var("WHCANRC_AUDIO_CHANNELS") {
+        if let Ok(val) = std::env::var("PEWCAST_AUDIO_CHANNELS") {
             config.audio_channels = val.parse()?;
         }
-        if let Ok(val) = std::env::var("WHCANRC_OPUS_FRAME_MS") {
+        if let Ok(val) = std::env::var("PEWCAST_OPUS_FRAME_MS") {
             config.opus_frame_ms = val.parse()?;
         }
-        if let Ok(val) = std::env::var("WHCANRC_WASAPI_EXCLUSIVE") {
+        if let Ok(val) = std::env::var("PEWCAST_WASAPI_EXCLUSIVE") {
             config.wasapi_exclusive = val == "1" || val.eq_ignore_ascii_case("true");
         }
-        if let Ok(val) = std::env::var("WHCANRC_HEARTBEAT_TIMEOUT_SECS") {
+        if let Ok(val) = std::env::var("PEWCAST_HEARTBEAT_TIMEOUT_SECS") {
             config.heartbeat_timeout_secs = val.parse()?;
         }
 
@@ -73,8 +73,8 @@ impl Config {
 }
 
 /// User preferences persisted across launches (device selection, exclusive mode).
-/// Stored in `%APPDATA%/whcanrc-assisted-listening/prefs.toml` on Windows,
-/// `~/.config/whcanrc-assisted-listening/prefs.toml` on Linux/macOS.
+/// Stored in `%APPDATA%/pewcast/prefs.toml` on Windows,
+/// `~/.config/pewcast/prefs.toml` on Linux/macOS.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UserPrefs {
@@ -84,7 +84,7 @@ pub struct UserPrefs {
 
 impl UserPrefs {
     fn prefs_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("whcanrc-assisted-listening").join("prefs.toml"))
+        dirs::config_dir().map(|d| d.join("pewcast").join("prefs.toml"))
     }
 
     /// Load saved preferences. Returns defaults if the file doesn't exist or is corrupt.

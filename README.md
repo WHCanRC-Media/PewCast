@@ -1,4 +1,4 @@
-# WHCanRC Assisted Listening
+# PewCast
 
 A low-latency WebRTC audio streaming server for assisted listening. A lecturer speaks into a microphone, the audio is captured on a PC, and listeners on the same WiFi network open a browser on their phone to hear it with minimal latency.
 
@@ -6,7 +6,7 @@ A low-latency WebRTC audio streaming server for assisted listening. A lecturer s
 
 1. **Run the server:**
    ```bash
-   ./whcanrc-assisted-listening
+   ./pewcast
    ```
 
 2. **Open a browser** on any device on the same network:
@@ -32,7 +32,7 @@ A low-latency WebRTC audio streaming server for assisted listening. A lecturer s
 cargo build --release
 ```
 
-The binary will be at `target/release/whcanrc-assisted-listening`.
+The binary will be at `target/release/pewcast`.
 
 ## Configuration
 
@@ -45,10 +45,10 @@ audio_sample_rate = 48000
 audio_channels = 1          # mono is sufficient for speech
 ```
 
-All values can be overridden via environment variables with the `WHCANRC_` prefix:
+All values can be overridden via environment variables with the `PEWCAST_` prefix:
 
 ```bash
-WHCANRC_PORT=9000 ./whcanrc-assisted-listening
+PEWCAST_PORT=9000 ./pewcast
 ```
 
 ## Running as a Service
@@ -58,20 +58,20 @@ WHCANRC_PORT=9000 ./whcanrc-assisted-listening
 1. Copy the binary to `/usr/local/bin/`
 2. Create the config directory and config file:
    ```bash
-   sudo mkdir -p /etc/whcanrc
-   sudo cp config.toml.example /etc/whcanrc/config.toml
+   sudo mkdir -p /etc/pewcast
+   sudo cp config.toml.example /etc/pewcast/config.toml
    ```
 3. Install the systemd unit:
    ```bash
-   sudo cp whcanrc-assisted-listening.service /etc/systemd/system/
+   sudo cp pewcast.service /etc/systemd/system/
    sudo systemctl daemon-reload
-   sudo systemctl enable --now whcanrc-assisted-listening
+   sudo systemctl enable --now pewcast
    ```
 
 ### Windows
 
-Run the NSIS installer (`whcanrc-assisted-listening-setup.exe`). It will:
-- Install the binary to `C:\Program Files\WHCanRC Assisted Listening\`
+Run the NSIS installer (`pewcast-setup.exe`). It will:
+- Install the binary to `C:\Program Files\PewCast\`
 - Install and start the Windows Service
 - Add a firewall rule for the configured port
 - Create an uninstaller

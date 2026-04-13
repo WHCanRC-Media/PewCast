@@ -1,4 +1,4 @@
-package org.whcanrc.assistedlistening.ui.theme
+package org.whcanrc.pewcast.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -18,7 +18,7 @@ private val DarkColorScheme = darkColorScheme(
 )
 
 @Composable
-fun AssistedListeningTheme(content: @Composable () -> Unit) {
+fun PewCastTheme(content: @Composable () -> Unit) {
     val colorScheme = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && isSystemInDarkTheme()) {
         dynamicDarkColorScheme(LocalContext.current)
     } else {

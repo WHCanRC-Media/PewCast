@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.AssistedListening" parent="android:Theme.Material.NoActionBar">
+    <style name="Theme.PewCast" parent="android:Theme.Material.NoActionBar">
     </style>
 </resources>

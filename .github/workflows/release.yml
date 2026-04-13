@@ -24,15 +24,15 @@ jobs:
         run: cargo build --release --target x86_64-unknown-linux-gnu
       - name: Package binary
         run: |
-          cp target/x86_64-unknown-linux-gnu/release/whcanrc-assisted-listening whcanrc-assisted-listening-linux-x86_64
-          tar czf whcanrc-assisted-listening-linux-x86_64.tar.gz whcanrc-assisted-listening-linux-x86_64 config.toml.example
+          cp target/x86_64-unknown-linux-gnu/release/pewcast pewcast-linux-x86_64
+          tar czf pewcast-linux-x86_64.tar.gz pewcast-linux-x86_64 config.toml.example
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: linux-artifacts
           path: |
-            whcanrc-assisted-listening-linux-x86_64
-            whcanrc-assisted-listening-linux-x86_64.tar.gz
+            pewcast-linux-x86_64
+            pewcast-linux-x86_64.tar.gz
 
   build-windows:
     name: Build (Windows)
@@ -47,12 +47,12 @@ jobs:
         run: cargo build --release --target x86_64-pc-windows-msvc
       - name: Rename binary
         run: |
-          copy target\x86_64-pc-windows-msvc\release\whcanrc-assisted-listening.exe whcanrc-assisted-listening-windows-x86_64.exe
+          copy target\x86_64-pc-windows-msvc\release\pewcast.exe pewcast-windows-x86_64.exe
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-artifacts
-          path: whcanrc-assisted-listening-windows-x86_64.exe
+          path: pewcast-windows-x86_64.exe
 
   build-android:
     name: Build (Android)
@@ -81,12 +81,12 @@ jobs:
         working-directory: android
         run: ./gradlew assembleRelease
       - name: Rename APK
-        run: cp android/app/build/outputs/apk/release/app-release-unsigned.apk whcanrc-assisted-listening-android.apk
+        run: cp android/app/build/outputs/apk/release/app-release-unsigned.apk pewcast-android.apk
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: android-artifacts
-          path: whcanrc-assisted-listening-android.apk
+          path: pewcast-android.apk
 
   build-installer:
     name: Build NSIS Installer
@@ -105,7 +105,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: installer-artifacts
-          path: installer/whcanrc-assisted-listening-setup.exe
+          path: installer/pewcast-setup.exe
 
   release:
     name: Create Release
@@ -119,9 +119,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            whcanrc-assisted-listening-linux-x86_64
-            whcanrc-assisted-listening-linux-x86_64.tar.gz
-            whcanrc-assisted-listening-windows-x86_64.exe
-            whcanrc-assisted-listening-setup.exe
-            whcanrc-assisted-listening-android.apk
+            pewcast-linux-x86_64
+            pewcast-linux-x86_64.tar.gz
+            pewcast-windows-x86_64.exe
+            pewcast-setup.exe
+            pewcast-android.apk
           generate_release_notes: true

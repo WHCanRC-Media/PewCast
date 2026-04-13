@@ -30,7 +30,7 @@ use server::{build_router, AppState};
 use webrtc::{audio_to_track_writer, PeerManager};
 use webtransport::{WebTransportServer, WebTransportState};
 
-/// WHCanRC Assisted Listening — low-latency WebRTC audio streaming server.
+/// PewCast — low-latency WebRTC audio streaming server.
 ///
 /// Captures audio from the system's default input device and streams it
 /// to browsers over WebRTC on the local network.
@@ -61,9 +61,9 @@ async fn main() -> anyhow::Result<()> {
     let log_dir = dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .unwrap_or_else(std::env::temp_dir)
-        .join("whcanrc-assisted-listening");
+        .join("pewcast");
     std::fs::create_dir_all(&log_dir).expect("Failed to create log directory");
-    let log_path = log_dir.join("whcanrc.log");
+    let log_path = log_dir.join("pewcast.log");
     let log_file =
         std::sync::Mutex::new(std::fs::File::create(&log_path).expect("Failed to create log file"));
     let env_filter = tracing_subscriber::EnvFilter::try_new(&config.log_level)
@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
             .init();
     }
 
-    info!("WHCanRC Assisted Listening starting up");
+    info!("PewCast starting up");
     info!(
         "Configuration: port={}, sample_rate={}, channels={}",
         config.port, config.audio_sample_rate, config.audio_channels

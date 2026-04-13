@@ -1,4 +1,4 @@
-package org.whcanrc.assistedlistening
+package org.whcanrc.pewcast
 
 import android.content.Intent
 import android.os.Bundle
@@ -15,9 +15,9 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import org.whcanrc.assistedlistening.ui.LatencyTestScreen
-import org.whcanrc.assistedlistening.ui.ListeningScreen
-import org.whcanrc.assistedlistening.ui.theme.AssistedListeningTheme
+import org.whcanrc.pewcast.ui.LatencyTestScreen
+import org.whcanrc.pewcast.ui.ListeningScreen
+import org.whcanrc.pewcast.ui.theme.PewCastTheme
 
 data class LatencyTestAction(val count: Int, val serverAddress: String?)
 
@@ -28,7 +28,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            AssistedListeningTheme {
+            PewCastTheme {
                 AppNavigation(this)
             }
         }

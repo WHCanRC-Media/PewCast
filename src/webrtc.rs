@@ -45,7 +45,7 @@ impl PeerManager {
                 ..Default::default()
             },
             "audio".to_string(),
-            "whcanrc-stream".to_string(),
+            "pewcast-stream".to_string(),
         ));
 
         Ok(Self {

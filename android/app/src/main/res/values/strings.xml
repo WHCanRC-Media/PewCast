@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Assisted Listening</string>
+    <string name="app_name">PewCast</string>
     <string name="notification_channel_name">Audio Playback</string>
     <string name="notification_channel_description">Shows when audio streaming is active</string>
 </resources>

@@ -42,11 +42,11 @@ import urllib.error
 import ssl
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-SERVER_BINARY = os.path.join(PROJECT_DIR, "target", "release", "whcanrc-assisted-listening")
+SERVER_BINARY = os.path.join(PROJECT_DIR, "target", "release", "pewcast")
 APK_PATH = os.path.join(
     PROJECT_DIR, "android", "app", "build", "outputs", "apk", "debug", "app-debug.apk"
 )
-PACKAGE = "org.whcanrc.assistedlistening"
+PACKAGE = "org.pewcast.pewcast"
 ACTIVITY = f"{PACKAGE}/.MainActivity"
 
 # Will be set to ["-s", "<serial>"] if needed, or [] if only one device

@@ -1,4 +1,4 @@
-package org.whcanrc.assistedlistening.ui
+package org.whcanrc.pewcast.ui
 
 import android.util.Log
 import androidx.compose.animation.animateColorAsState
@@ -26,7 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import org.whcanrc.assistedlistening.audio.ChirpTester
+import org.whcanrc.pewcast.audio.ChirpTester
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.SecureRandom

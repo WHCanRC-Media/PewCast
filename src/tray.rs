@@ -74,7 +74,7 @@ fn run_tray(
 
     let _tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("WHCanRC Assisted Listening")
+        .with_tooltip("PewCast")
         .with_icon(icon)
         .build()?;
 
@@ -248,7 +248,7 @@ fn show_qr_code(url: &str) {
 
     let html = format!(
         r#"<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Connect — WHCanRC</title>
+<html><head><meta charset="utf-8"><title>Connect — PewCast</title>
 <style>
   body {{ display:flex; flex-direction:column; align-items:center; justify-content:center;
          height:100vh; margin:0; font-family:system-ui,sans-serif; background:#f5f5f5; }}
@@ -259,7 +259,7 @@ fn show_qr_code(url: &str) {
         url = url
     );
 
-    let path = std::env::temp_dir().join("whcanrc_qr.html");
+    let path = std::env::temp_dir().join("pewcast_qr.html");
     if let Err(e) = std::fs::write(&path, html) {
         error!("Failed to write QR code file: {}", e);
         return;
@@ -332,7 +332,7 @@ fn show_log(log_path: &std::path::Path) {
             .args([
                 "/C",
                 "start",
-                "WHCanRC Log",
+                "PewCast Log",
                 "powershell",
                 "-Command",
                 &format!("Get-Content '{}' -Wait -Tail 100", path),

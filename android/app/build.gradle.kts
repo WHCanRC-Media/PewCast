@@ -35,12 +35,12 @@ tasks.named("preBuild") {
 }
 
 android {
-    namespace = "org.whcanrc.assistedlistening"
+    namespace = "org.whcanrc.pewcast"
     compileSdk = 35
     ndkVersion = "27.0.12077973"
 
     defaultConfig {
-        applicationId = "org.whcanrc.assistedlistening"
+        applicationId = "org.whcanrc.pewcast"
         minSdk = 26
         targetSdk = 35
         versionCode = 1

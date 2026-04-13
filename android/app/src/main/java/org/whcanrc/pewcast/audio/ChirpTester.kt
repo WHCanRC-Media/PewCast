@@ -1,4 +1,4 @@
-package org.whcanrc.assistedlistening.audio
+package org.whcanrc.pewcast.audio
 
 class ChirpTester {
     companion object {

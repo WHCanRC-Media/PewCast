@@ -1,12 +1,12 @@
 [package]
-name = "whcanrc-assisted-listening"
+name = "pewcast"
 version = "0.1.0"
 edition = "2021"
 description = "Low-latency WebRTC audio streaming server for assisted listening"
 license = "MIT"
 
 [[bin]]
-name = "whcanrc-assisted-listening"
+name = "pewcast"
 path = "src/main.rs"
 
 [dependencies]

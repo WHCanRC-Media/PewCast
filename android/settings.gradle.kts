@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "WHCanRC Assisted Listening"
+rootProject.name = "PewCast"
 include(":app")

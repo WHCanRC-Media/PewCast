@@ -1,4 +1,4 @@
-package org.whcanrc.assistedlistening.ui
+package org.whcanrc.pewcast.ui
 
 import android.content.Context
 import android.net.nsd.NsdManager
@@ -31,7 +31,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import org.whcanrc.assistedlistening.audio.AudioEngine
+import org.whcanrc.pewcast.audio.AudioEngine
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.SecureRandom
@@ -43,7 +43,7 @@ import javax.net.ssl.X509TrustManager
 import kotlin.math.roundToInt
 
 private const val TAG = "ListeningScreen"
-private const val SERVICE_TYPE = "_whcanrc._tcp."
+private const val SERVICE_TYPE = "_pewcast._tcp."
 
 private data class DiscoveredServer(val name: String, val address: String)
 
@@ -233,7 +233,7 @@ fun ListeningScreen(
         ) {
             // Title
             Text(
-                text = "WHCanRC Assisted Listening",
+                text = "PewCast",
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onBackground,
                 textAlign = TextAlign.Center

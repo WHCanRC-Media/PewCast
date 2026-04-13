@@ -2592,6 +2592,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "pewcast"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audiopus",
+ "axum",
+ "axum-server",
+ "base64 0.22.1",
+ "bytes",
+ "clap",
+ "cpal",
+ "dirs",
+ "gtk",
+ "hostname",
+ "libc",
+ "mdns-sd",
+ "muda",
+ "nu-ansi-term",
+ "png 0.18.1",
+ "qrcode",
+ "rcgen 0.13.2",
+ "ringbuf",
+ "rustls",
+ "serde",
+ "serde_json",
+ "socket2 0.5.10",
+ "spin_sleep",
+ "tokio",
+ "toml 0.8.2",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "tray-icon",
+ "webrtc",
+ "windows 0.62.2",
+ "winresource",
+ "wtransport",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4441,46 +4481,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "winapi",
-]
-
-[[package]]
-name = "whcanrc-assisted-listening"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "audiopus",
- "axum",
- "axum-server",
- "base64 0.22.1",
- "bytes",
- "clap",
- "cpal",
- "dirs",
- "gtk",
- "hostname",
- "libc",
- "mdns-sd",
- "muda",
- "nu-ansi-term",
- "png 0.18.1",
- "qrcode",
- "rcgen 0.13.2",
- "ringbuf",
- "rustls",
- "serde",
- "serde_json",
- "socket2 0.5.10",
- "spin_sleep",
- "tokio",
- "toml 0.8.2",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "tray-icon",
- "webrtc",
- "windows 0.62.2",
- "winresource",
- "wtransport",
 ]
 
 [[package]]

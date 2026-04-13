@@ -5,7 +5,7 @@ use tracing::{error, info};
 
 use crate::config::Config;
 
-const SERVICE_TYPE: &str = "_whcanrc._tcp.local.";
+const SERVICE_TYPE: &str = "_pewcast._tcp.local.";
 
 /// Determine the local IPv4 address used for LAN traffic.
 fn local_ipv4() -> Option<Ipv4Addr> {
@@ -41,7 +41,7 @@ pub fn advertise(config: &Config) -> Option<ServiceDaemon> {
     let hostname = hostname::get()
         .ok()
         .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "whcanrc-server".to_string());
+        .unwrap_or_else(|| "pewcast-server".to_string());
 
     let mut addrs: Vec<IpAddr> = Vec::new();
     if let Some(ip4) = local_ipv4() {
