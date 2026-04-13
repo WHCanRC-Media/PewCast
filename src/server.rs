@@ -178,7 +178,7 @@ struct StatusResponse {
 
 const APK_GIT_SHA: &str = env!("APK_GIT_SHA");
 const APK_DOWNLOAD_URL: &str =
-    "https://github.com/WHCanRC-Media/WHCanRC_Assisted_Listening/releases/latest/download/pewcast-android.apk";
+    "https://github.com/WHCanRC-Media/PewCast/releases/latest/download/pewcast-android.apk";
 
 async fn status_handler(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
     Json(StatusResponse {
