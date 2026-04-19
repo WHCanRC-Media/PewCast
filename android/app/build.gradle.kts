@@ -169,4 +169,7 @@ dependencies {
 
     // Core
     implementation("androidx.core:core-ktx:1.15.0")
+
+    // MediaSession + MediaStyle notification
+    implementation("androidx.media:media:1.7.0")
 }

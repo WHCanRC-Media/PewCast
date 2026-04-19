@@ -1,13 +1,23 @@
 package org.whcanrc.pewcast.ui
 
+import android.Manifest
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
-import android.net.wifi.WifiManager
+import android.os.Build
+import android.os.IBinder
 import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.collectAsState
+import androidx.core.content.ContextCompat
 import org.whcanrc.pewcast.BuildConfig
+import org.whcanrc.pewcast.audio.PlaybackService
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
@@ -34,7 +44,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import org.whcanrc.pewcast.audio.AudioEngine
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.SecureRandom
@@ -66,7 +75,7 @@ fun ListeningScreen(
     onNavigateToLatencyTest: (serverAddress: String) -> Unit = {}
 ) {
     val context = LocalContext.current
-    val engine = remember { AudioEngine() }
+    var playbackService by remember { mutableStateOf<PlaybackService?>(null) }
     var isConnected by remember { mutableStateOf(false) }
     var isConnecting by remember { mutableStateOf(false) }
     var targetBufferMs by remember { mutableFloatStateOf(30f) }
@@ -75,11 +84,53 @@ fun ListeningScreen(
     var connectionError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    // Low-latency WiFi lock
-    val wifiLock = remember {
-        val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "AudioEngine").apply {
-            setReferenceCounted(false)
+    // Bind to the PlaybackService for this composition's lifetime. BIND_AUTO_CREATE
+    // instantiates the service on first bind; once we call startForegroundService +
+    // startForeground from PlaybackService.commitPlayback, it keeps running past
+    // unbind until it stops itself.
+    DisposableEffect(Unit) {
+        val connection = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                playbackService = (binder as PlaybackService.LocalBinder).service
+            }
+            override fun onServiceDisconnected(name: ComponentName?) {
+                playbackService = null
+            }
+        }
+        val intent = Intent(context, PlaybackService::class.java)
+        context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        onDispose {
+            try { context.unbindService(connection) } catch (_: Exception) {}
+        }
+    }
+
+    // Reflect external stop (notification action, Bluetooth button) into UI state.
+    val servicePlaying = playbackService?.isPlaying?.collectAsState()?.value ?: false
+    LaunchedEffect(servicePlaying) {
+        if (!servicePlaying && isConnected) {
+            isConnected = false
+            isConnecting = false
+            val cid = clientId
+            val addr = serverAddress
+            clientId = null
+            if (cid != null && addr.isNotBlank()) {
+                scope.launch(Dispatchers.IO) { httpLeave(addr, cid) }
+            }
+        }
+    }
+
+    // Runtime POST_NOTIFICATIONS permission (API 33+). Without it the foreground
+    // notification is suppressed — the service still runs, but the user has no
+    // visible media controls. Ask once on first composition; ignore the result.
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* ignored */ }
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context, Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -122,13 +173,6 @@ fun ListeningScreen(
         } catch (_: Exception) {}
 
         onDispose {
-            if (isConnected) {
-                engine.stop()
-                wifiLock.release()
-                clientId?.let { cid ->
-                    scope.launch(Dispatchers.IO) { httpLeave(serverAddress, cid) }
-                }
-            }
             try { nsdManager.stopServiceDiscovery(listener) } catch (_: Exception) {}
         }
     }
@@ -192,11 +236,14 @@ fun ListeningScreen(
 
     LaunchedEffect(isConnected) {
         while (isConnected) {
-            bufferMs = engine.getBufferMs()
-            playbackRate = engine.getPlaybackRate()
-            lostPackets = engine.getLostPackets()
-            underruns = engine.getUnderruns()
-            peakLevel = engine.getPeakLevel()
+            val eng = playbackService?.engine
+            if (eng != null) {
+                bufferMs = eng.getBufferMs()
+                playbackRate = eng.getPlaybackRate()
+                lostPackets = eng.getLostPackets()
+                underruns = eng.getUnderruns()
+                peakLevel = eng.getPeakLevel()
+            }
             delay(100)
         }
     }
@@ -235,15 +282,17 @@ fun ListeningScreen(
     )
 
     val connectDisconnect = {
-        if (isConnected) {
-            engine.stop()
-            wifiLock.release()
+        val svc = playbackService
+        if (svc == null) {
+            connectionError = "Playback service not ready"
+        } else if (isConnected) {
             val cid = clientId
             val addr = serverAddress
             clientId = null
             isConnected = false
             isConnecting = false
             connectionError = null
+            svc.stopPlayback()
             if (cid != null) {
                 scope.launch(Dispatchers.IO) { httpLeave(addr, cid) }
             }
@@ -255,15 +304,12 @@ fun ListeningScreen(
                 isConnecting = true
                 scope.launch {
                     val result = withContext(Dispatchers.IO) {
-                        engine.setTargetBufferMs(targetBufferMs.roundToInt())
                         val host = serverAddress.substringBefore(":")
-                        if (!engine.start(host, 0)) {
-                            return@withContext "Failed to start audio engine"
-                        }
-                        val listenPort = engine.getListenPort()
+                        val listenPort = svc.preparePlayback(host, targetBufferMs.roundToInt())
+                            ?: return@withContext "Failed to start audio engine"
                         val joinResult = httpJoin(serverAddress, listenPort)
                         if (joinResult == null) {
-                            engine.stop()
+                            svc.abortPlayback()
                             return@withContext "Failed to connect to server"
                         }
                         clientId = joinResult
@@ -273,7 +319,12 @@ fun ListeningScreen(
                     if (result != null) {
                         connectionError = result
                     } else {
-                        wifiLock.acquire()
+                        // startForegroundService + startForeground must happen together
+                        // on API 26+ so the OS doesn't ANR us.
+                        ContextCompat.startForegroundService(
+                            context, Intent(context, PlaybackService::class.java)
+                        )
+                        svc.commitPlayback()
                         isConnected = true
                     }
                 }
@@ -492,7 +543,7 @@ fun ListeningScreen(
                                 value = targetBufferMs,
                                 onValueChange = {
                                     targetBufferMs = it
-                                    engine.setTargetBufferMs(it.roundToInt())
+                                    playbackService?.engine?.setTargetBufferMs(it.roundToInt())
                                 },
                                 valueRange = 5f..200f,
                                 steps = 38,
