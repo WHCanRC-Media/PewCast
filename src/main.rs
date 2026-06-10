@@ -1,4 +1,5 @@
-// On Windows, show console window on launch for log visibility.
+// On Windows, run as a GUI app so no console window appears on launch.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod audio;
 mod client_registry;
