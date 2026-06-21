@@ -84,17 +84,16 @@ bool AudioEngine::start(const char* serverAddr, int listenPort) {
     tv.tv_usec = 100000;  // 100ms
     setsockopt(mSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    // Create Oboe audio stream with i16 format
-    oboe::AudioStreamBuilder builder;
-    builder.setDirection(oboe::Direction::Output)
-           ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
-           ->setSharingMode(oboe::SharingMode::Exclusive)
-           ->setFormat(oboe::AudioFormat::I16)
-           ->setChannelCount(kChannels)
-           ->setSampleRate(kSampleRate)
-           ->setDataCallback(this);
-
-    oboe::Result result = builder.openStream(mStream);
+    // Open the output stream. Try Exclusive/LowLatency first (best for the
+    // built-in path), but fall back to Shared if it fails to open — USB DAC
+    // HALs frequently don't offer the exclusive/MMAP endpoint at all. The
+    // framework resamples/upmixes in shared mode, so mono 48k I16 still works.
+    oboe::Result result = openOutputStream(oboe::SharingMode::Exclusive);
+    if (result != oboe::Result::OK) {
+        LOGI("Exclusive open failed (%s), falling back to shared mode",
+             oboe::convertToText(result));
+        result = openOutputStream(oboe::SharingMode::Shared);
+    }
     if (result != oboe::Result::OK) {
         LOGE("Failed to open audio stream: %s", oboe::convertToText(result));
         close(mSocket);
@@ -120,30 +119,48 @@ bool AudioEngine::start(const char* serverAddr, int listenPort) {
         pthread_setschedparam(mNetworkThread.native_handle(), SCHED_RR, &param);
     }
 
-    // Start audio stream
+    // Start audio stream. An exclusive stream can open but fail to start under
+    // endpoint contention (e.g. USB device-release race on reconnect); in that
+    // case rebuild as shared and retry before giving up.
     result = mStream->requestStart();
+    if (result != oboe::Result::OK &&
+        mStream->getSharingMode() == oboe::SharingMode::Exclusive) {
+        LOGI("Exclusive start failed (%s), rebuilding in shared mode",
+             oboe::convertToText(result));
+        mStream->close();
+        mStream.reset();
+        result = openOutputStream(oboe::SharingMode::Shared);
+        if (result == oboe::Result::OK) {
+            result = mStream->requestStart();
+        }
+    }
     if (result != oboe::Result::OK) {
         LOGE("Failed to start audio stream: %s", oboe::convertToText(result));
         mRunning.store(false);
         mNetworkThread.join();
-        mStream->close();
-        mStream.reset();
+        if (mStream) {
+            mStream->close();
+            mStream.reset();
+        }
         close(mSocket);
         mSocket = -1;
         return false;
     }
 
-    LOGI("AudioEngine started: server=%s, listenPort=%d, ringSize=%d, target=%d samples",
-         mServerAddr.c_str(), mListenPort, mRingSize, targetSamples);
+    LOGI("AudioEngine started: api=%d sharing=%d rate=%d ch=%d listenPort=%d "
+         "(server=%s, ringSize=%d, target=%d samples)",
+         (int)mStream->getAudioApi(), (int)mStream->getSharingMode(),
+         mStream->getSampleRate(), mStream->getChannelCount(), mListenPort,
+         mServerAddr.c_str(), mRingSize, targetSamples);
     return true;
 }
 
 void AudioEngine::stop() {
-    if (!mRunning.load()) {
+    // exchange() makes stop() idempotent and safe against concurrent callers
+    // (the JNI thread and the Oboe error-callback teardown can race).
+    if (!mRunning.exchange(false)) {
         return;
     }
-
-    mRunning.store(false);
 
     // Stop audio stream first
     if (mStream) {
@@ -164,6 +181,44 @@ void AudioEngine::stop() {
     }
 
     LOGI("AudioEngine stopped");
+}
+
+oboe::Result AudioEngine::openOutputStream(oboe::SharingMode sharingMode) {
+    oboe::AudioStreamBuilder builder;
+    builder.setDirection(oboe::Direction::Output)
+           ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+           ->setSharingMode(sharingMode)
+           ->setFormat(oboe::AudioFormat::I16)
+           ->setChannelCount(kChannels)
+           ->setSampleRate(kSampleRate)
+           ->setDataCallback(this)
+           ->setErrorCallback(this);
+
+    // Retry the open a few times: when a stream is reconnected the USB audio
+    // HAL releases the previous endpoint asynchronously, so the first open can
+    // transiently fail even though the device is fine.
+    oboe::Result result = oboe::Result::ErrorInternal;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        result = builder.openStream(mStream);
+        if (result == oboe::Result::OK) {
+            return result;
+        }
+        LOGE("openStream attempt %d (sharing=%d) failed: %s",
+             attempt + 1, (int)sharingMode, oboe::convertToText(result));
+        usleep(150 * 1000);  // 150ms backoff for the HAL to release the endpoint
+    }
+    return result;
+}
+
+void AudioEngine::onErrorAfterClose(oboe::AudioStream* /*stream*/, oboe::Result error) {
+    LOGE("Audio stream error: %s — tearing down playback", oboe::convertToText(error));
+    if (!mRunning.load()) {
+        return;
+    }
+    // Oboe has already closed the stream by this point. Run the rest of the
+    // teardown on a detached thread because stop() joins the network thread,
+    // which must not be done from the Oboe callback thread.
+    std::thread([this]() { stop(); }).detach();
 }
 
 void AudioEngine::setTargetBufferMs(int ms) {
@@ -315,6 +370,11 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
 
     int16_t* output = static_cast<int16_t*>(audioData);
 
+    // The output stream may be granted more than one channel (e.g. a stereo USB
+    // DAC opened exclusively). The internal/network format stays mono, so we
+    // compute one sample per frame and duplicate it across every channel.
+    int channelCount = stream->getChannelCount();
+
     int writePos = mWritePos.load(std::memory_order_acquire);
     int readPos = mReadPos.load(std::memory_order_relaxed);
 
@@ -334,9 +394,10 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
     // Read with linear interpolation (interpolate in i16, output i16)
     int16_t peakAbs = 0;
     for (int i = 0; i < numFrames; i++) {
+        int16_t sample;
         if (available <= 1) {
             // Underrun - output silence
-            output[i] = 0;
+            sample = 0;
             mUnderruns.fetch_add(1, std::memory_order_relaxed);
         } else {
             int idx = readPos % mRingSize;
@@ -350,7 +411,7 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
             // Clamp to i16 range
             if (interpolated > 32767) interpolated = 32767;
             if (interpolated < -32768) interpolated = -32768;
-            output[i] = static_cast<int16_t>(interpolated);
+            sample = static_cast<int16_t>(interpolated);
 
             // Advance position by playback rate
             mFractionalPos += playbackRate;
@@ -361,8 +422,13 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
             }
         }
 
+        // Duplicate the mono sample across every channel in this frame
+        for (int c = 0; c < channelCount; c++) {
+            output[i * channelCount + c] = sample;
+        }
+
         // Track peak level for volume meter
-        int16_t abs = output[i] < 0 ? -output[i] : output[i];
+        int16_t abs = sample < 0 ? -sample : sample;
         if (abs > peakAbs) peakAbs = abs;
     }
 
