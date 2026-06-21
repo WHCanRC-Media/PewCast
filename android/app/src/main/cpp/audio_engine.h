@@ -9,7 +9,8 @@
 
 namespace audioengine {
 
-class AudioEngine : public oboe::AudioStreamDataCallback {
+class AudioEngine : public oboe::AudioStreamDataCallback,
+                    public oboe::AudioStreamErrorCallback {
 public:
     AudioEngine();
     ~AudioEngine();
@@ -37,6 +38,14 @@ private:
         oboe::AudioStream* stream,
         void* audioData,
         int32_t numFrames) override;
+
+    // Oboe error callback — fires on a mid-session disconnect (e.g. USB DAC
+    // unplugged). Triggers a clean teardown instead of going silent.
+    void onErrorAfterClose(oboe::AudioStream* stream, oboe::Result error) override;
+
+    // Open the output stream with the given sharing mode, retrying a few times
+    // to ride out the USB HAL's asynchronous endpoint release on reconnect.
+    oboe::Result openOutputStream(oboe::SharingMode sharingMode);
 
     void networkThread();
     void writeToRing(const int16_t* samples, int count);
