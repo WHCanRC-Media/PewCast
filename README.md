@@ -70,7 +70,7 @@ PEWCAST_PORT=9000 ./pewcast
 
 ### Windows
 
-Run the NSIS installer (`pewcast-setup.exe`). It will:
+Run the NSIS installer (`pewcast-windows-setup.exe`). It will:
 - Install the binary to `C:\Program Files\PewCast\`
 - Install and start the Windows Service
 - Add a firewall rule for the configured port

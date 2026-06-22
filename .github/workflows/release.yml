@@ -133,7 +133,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: installer-artifacts
-          path: installer/pewcast-setup.exe
+          path: installer/pewcast-windows-setup.exe
 
   release:
     name: Create Release
@@ -149,7 +149,6 @@ jobs:
           files: |
             pewcast-linux-x86_64
             pewcast-linux-x86_64.tar.gz
-            pewcast-windows-x86_64.exe
-            pewcast-setup.exe
+            pewcast-windows-setup.exe
             pewcast-android.apk
           generate_release_notes: true

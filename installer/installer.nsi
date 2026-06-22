@@ -1,7 +1,7 @@
 !include "MUI2.nsh"
 
 Name "PewCast"
-OutFile "pewcast-setup.exe"
+OutFile "pewcast-windows-setup.exe"
 InstallDir "$PROGRAMFILES\PewCast"
 RequestExecutionLevel admin
 
