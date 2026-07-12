@@ -155,9 +155,17 @@ pub async fn run(
                 let frame: Option<Vec<i16>> = {
                     let mut buf = pcm_for_sender.lock().unwrap();
                     if buf.len() >= MAX_SAMPLES_PER_DATAGRAM {
-                        // Cap buffer to prevent latency buildup from clock drift.
-                        // Max 4 frames (~20ms at 5ms/frame).
-                        let max_buf = MAX_SAMPLES_PER_DATAGRAM * 4;
+                        // Cap the backlog to bound latency from clock drift. This
+                        // ceiling MUST exceed the capture device's per-callback
+                        // burst size: when a small low-latency capture period
+                        // isn't available, cpal delivers 20-45ms (1000-2000+
+                        // samples) in a single callback. A cap smaller than one
+                        // burst would make the next pacer tick discard the burst's
+                        // tail before it's sent, throwing away a large fraction of
+                        // the audio and starving the client. 20 frames (~100ms)
+                        // clears any realistic burst; normal occupancy stays around
+                        // one burst, so this is only reached under sustained drift.
+                        let max_buf = MAX_SAMPLES_PER_DATAGRAM * 20;
                         if buf.len() > max_buf {
                             let skip = buf.len() - max_buf;
                             buf.drain(..skip);

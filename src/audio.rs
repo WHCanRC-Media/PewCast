@@ -76,6 +76,33 @@ impl AudioSource for CpalAudioSource {
             device.name().unwrap_or_else(|_| "Unknown".to_string())
         );
 
+        // Report the smallest capture buffer (period) the device advertises. The
+        // device hands us audio one period at a time, so this sets the lower
+        // bound on capture latency — a large minimum here means low-latency
+        // small buffers aren't available and capture will arrive in big bursts.
+        match device.supported_input_configs() {
+            Ok(configs) => {
+                let min_frames = configs
+                    .filter_map(|c| match c.buffer_size() {
+                        cpal::SupportedBufferSize::Range { min, .. } => Some(*min),
+                        cpal::SupportedBufferSize::Unknown => None,
+                    })
+                    .min();
+                match min_frames {
+                    Some(frames) => info!(
+                        "Device minimum capture buffer: {} frames ({:.1}ms at {}Hz)",
+                        frames,
+                        frames as f32 / sample_rate as f32 * 1000.0,
+                        sample_rate
+                    ),
+                    None => {
+                        info!("Device does not advertise a minimum capture buffer size")
+                    }
+                }
+            }
+            Err(e) => warn!("Could not query supported capture configs: {}", e),
+        }
+
         // Determine which sample format the device supports (prefer F32, fall back to I16)
         let use_i16 = {
             let supported = device.supported_input_configs();
