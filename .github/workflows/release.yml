@@ -23,11 +23,6 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libgtk-3-dev
       - name: Build release
-        # audiopus_sys builds bundled Opus via CMake, whose CMakeLists declares a
-        # pre-3.5 minimum that CMake 4 refuses. The crate is unmaintained, so pin
-        # the policy floor here. (ubuntu-latest still ships CMake 3.x; future-proofing.)
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         run: cargo build --release --target x86_64-unknown-linux-gnu
       - name: Package binary
         run: |
@@ -53,10 +48,6 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
       - name: Build release
-        # windows-latest now ships CMake 4, which rejects the pre-3.5 minimum in
-        # the Opus CMakeLists bundled by the unmaintained audiopus_sys crate.
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         run: cargo build --release --target x86_64-pc-windows-msvc
       - name: Rename binary
         run: |

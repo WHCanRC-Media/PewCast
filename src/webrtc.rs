@@ -176,8 +176,7 @@ pub async fn audio_to_track_writer(
     mut audio_rx: broadcast::Receiver<AudioChunk>,
     opus_frame_ms: u64,
 ) {
-    use audiopus::coder::Encoder;
-    use audiopus::{Application, Bitrate, Channels, SampleRate, Signal};
+    use opus_rs::{Application, OpusEncoder};
     use webrtc::media::Sample;
 
     // Calculate frame size in samples: e.g. 10ms at 48kHz = 480 samples
@@ -189,8 +188,9 @@ pub async fn audio_to_track_writer(
         opus_frame_ms, opus_frame_size
     );
 
-    let mut encoder = match Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::LowDelay)
-    {
+    // RestrictedLowDelay is CELT-only: lowest algorithmic delay, no SILK layer
+    // (so a voice/music signal hint would be inert here).
+    let mut encoder = match OpusEncoder::new(48000, 1, Application::RestrictedLowDelay) {
         Ok(enc) => enc,
         Err(e) => {
             error!("Failed to create Opus encoder: {}", e);
@@ -198,9 +198,8 @@ pub async fn audio_to_track_writer(
         }
     };
     // Tune encoder for minimum latency
-    let _ = encoder.set_bitrate(Bitrate::BitsPerSecond(32000));
-    let _ = encoder.set_complexity(5);
-    let _ = encoder.set_signal(Signal::Voice);
+    encoder.bitrate_bps = 32000;
+    encoder.complexity = 5;
 
     // Buffer to accumulate samples into complete Opus frames
     let mut pcm_buffer: Vec<i16> = Vec::with_capacity(opus_frame_size * 2);
@@ -226,9 +225,13 @@ pub async fn audio_to_track_writer(
 
                 // Encode complete frames
                 while pcm_buffer.len() >= opus_frame_size {
-                    let frame: Vec<i16> = pcm_buffer.drain(..opus_frame_size).collect();
+                    // opus_rs takes normalized f32 [-1.0, 1.0]; our chunks are i16.
+                    let frame: Vec<f32> = pcm_buffer
+                        .drain(..opus_frame_size)
+                        .map(|s| s as f32 / 32768.0)
+                        .collect();
 
-                    match encoder.encode(&frame, &mut opus_output) {
+                    match encoder.encode(&frame, opus_frame_size, &mut opus_output) {
                         Ok(len) => {
                             let sample = Sample {
                                 data: opus_output[..len].to_vec().into(),

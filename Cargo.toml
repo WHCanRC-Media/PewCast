@@ -35,8 +35,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CLI
 clap = { version = "4", features = ["derive"] }
 
-# Audio encoding
-audiopus = "0.3.0-rc.0"
+# Audio encoding (Opus for the WebRTC browser-fallback path).
+# Pure-Rust port of libopus — no C toolchain/CMake, unlike the abandoned audiopus.
+opus-rs = "0.1.23"
 
 # TLS (self-signed for LAN getUserMedia support)
 axum-server = { version = "0.7", features = ["tls-rustls"] }
