@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -24,6 +25,10 @@ public:
 
     /// Returns the local UDP port bound for receiving audio.
     int getListenPort() const { return mListenPort; }
+
+    /// Why the last start() failed, or why a running stream was torn down.
+    /// Empty if nothing has gone wrong. Safe to call from any thread.
+    std::string getLastError() const;
 
     // Stats for UI (thread-safe)
     int getBufferMs() const;
@@ -49,6 +54,7 @@ private:
 
     void networkThread();
     void writeToRing(const int16_t* samples, int count);
+    void setLastError(const std::string& reason);
 
     // Constants
     static constexpr int kSampleRate = 48000;
@@ -90,6 +96,11 @@ private:
 
     // Oboe stream
     std::shared_ptr<oboe::AudioStream> mStream;
+
+    // Last failure reason, surfaced to the UI so a user can report something
+    // more useful than "it didn't work".
+    mutable std::mutex mLastErrorMutex;
+    std::string mLastError;
 };
 
 }  // namespace audioengine

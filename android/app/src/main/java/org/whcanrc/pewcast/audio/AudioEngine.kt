@@ -11,6 +11,10 @@ class AudioEngine {
     fun stop() = nativeStop()
     fun setTargetBufferMs(ms: Int) = nativeSetTargetBufferMs(ms)
     fun getListenPort(): Int = nativeGetListenPort()
+
+    /** Why the last [start] failed, or why a live stream was torn down. Empty if all is well. */
+    fun getLastError(): String = nativeGetLastError()
+
     fun getBufferMs(): Int = nativeGetBufferMs()
     fun getPlaybackRate(): Float = nativeGetPlaybackRate()
     fun getLostPackets(): Int = nativeGetLostPackets()
@@ -21,6 +25,7 @@ class AudioEngine {
     private external fun nativeStop()
     private external fun nativeSetTargetBufferMs(ms: Int)
     private external fun nativeGetListenPort(): Int
+    private external fun nativeGetLastError(): String
     private external fun nativeGetBufferMs(): Int
     private external fun nativeGetPlaybackRate(): Float
     private external fun nativeGetLostPackets(): Int

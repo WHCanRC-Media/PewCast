@@ -34,6 +34,14 @@ class PlaybackService : Service() {
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying
 
+    /**
+     * Identity of the session currently in progress. The service outlives the
+     * activity, so this has to live here — otherwise an activity recreated during
+     * playback comes back with no way to address the session it left running.
+     */
+    @Volatile var clientId: String? = null
+    @Volatile var serverAddress: String = ""
+
     private val binder = LocalBinder()
 
     inner class LocalBinder : Binder() {
@@ -81,15 +89,20 @@ class PlaybackService : Service() {
      * the handshake succeeds, or [abortPlayback] if it fails.
      */
     fun preparePlayback(host: String, targetBufferMs: Int): Int? {
-        if (_isPlaying.value) return null
+        // A session can still be live here if the UI lost track of it (activity
+        // recreated without adopting it). Tear it down and start fresh rather than
+        // failing, which would leave the button permanently dead until force-stop.
+        if (_isPlaying.value) teardown()
         engine.setTargetBufferMs(targetBufferMs)
         if (!engine.start(host, 0)) return null
         return engine.getListenPort()
     }
 
     /** Promote to a foreground service and publish the media session. */
-    fun commitPlayback() {
+    fun commitPlayback(clientId: String, serverAddress: String) {
         if (_isPlaying.value) return
+        this.clientId = clientId
+        this.serverAddress = serverAddress
         wifiLock.acquire()
         mediaSession.isActive = true
         updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
@@ -99,10 +112,16 @@ class PlaybackService : Service() {
 
     /** Tear down the engine after a failed handshake (no foreground was started). */
     fun abortPlayback() {
-        engine.stop()
+        teardown()
     }
 
     fun stopPlayback() {
+        teardown()
+        stopSelf()
+    }
+
+    /** Stop audio and drop session state, without stopping the service itself. */
+    private fun teardown() {
         val wasPlaying = _isPlaying.value
         engine.stop()
         if (wifiLock.isHeld) wifiLock.release()
@@ -112,7 +131,8 @@ class PlaybackService : Service() {
             _isPlaying.value = false
             stopForeground(STOP_FOREGROUND_REMOVE)
         }
-        stopSelf()
+        clientId = null
+        serverAddress = ""
     }
 
     private fun updatePlaybackState(state: Int) {

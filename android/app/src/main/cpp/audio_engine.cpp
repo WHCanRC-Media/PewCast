@@ -30,6 +30,7 @@ bool AudioEngine::start(const char* serverAddr, int listenPort) {
         return true;
     }
 
+    setLastError("");
     mServerAddr = serverAddr;
     mListenPort = listenPort;
 
@@ -49,6 +50,7 @@ bool AudioEngine::start(const char* serverAddr, int listenPort) {
     mSocket = socket(AF_INET, SOCK_DGRAM, 0);
     if (mSocket < 0) {
         LOGE("Failed to create socket: %s", strerror(errno));
+        setLastError(std::string("could not create UDP socket (") + strerror(errno) + ")");
         return false;
     }
 
@@ -64,6 +66,8 @@ bool AudioEngine::start(const char* serverAddr, int listenPort) {
 
     if (bind(mSocket, reinterpret_cast<sockaddr*>(&bindAddr), sizeof(bindAddr)) < 0) {
         LOGE("Failed to bind socket to port %d: %s", listenPort, strerror(errno));
+        setLastError("could not bind UDP port " + std::to_string(listenPort) + " (" +
+                     strerror(errno) + ")");
         close(mSocket);
         mSocket = -1;
         return false;
@@ -89,6 +93,7 @@ bool AudioEngine::start(const char* serverAddr, int listenPort) {
     // HALs frequently don't offer the exclusive/MMAP endpoint at all. The
     // framework resamples/upmixes in shared mode, so mono 48k I16 still works.
     oboe::Result result = openOutputStream(oboe::SharingMode::Exclusive);
+    oboe::Result exclusiveResult = result;
     if (result != oboe::Result::OK) {
         LOGI("Exclusive open failed (%s), falling back to shared mode",
              oboe::convertToText(result));
@@ -96,6 +101,9 @@ bool AudioEngine::start(const char* serverAddr, int listenPort) {
     }
     if (result != oboe::Result::OK) {
         LOGE("Failed to open audio stream: %s", oboe::convertToText(result));
+        setLastError(std::string("could not open the audio output — shared mode: ") +
+                     oboe::convertToText(result) + ", exclusive mode: " +
+                     oboe::convertToText(exclusiveResult));
         close(mSocket);
         mSocket = -1;
         return false;
@@ -136,6 +144,8 @@ bool AudioEngine::start(const char* serverAddr, int listenPort) {
     }
     if (result != oboe::Result::OK) {
         LOGE("Failed to start audio stream: %s", oboe::convertToText(result));
+        setLastError(std::string("audio output opened but would not start: ") +
+                     oboe::convertToText(result));
         mRunning.store(false);
         mNetworkThread.join();
         if (mStream) {
@@ -183,6 +193,16 @@ void AudioEngine::stop() {
     LOGI("AudioEngine stopped");
 }
 
+void AudioEngine::setLastError(const std::string& reason) {
+    std::lock_guard<std::mutex> lock(mLastErrorMutex);
+    mLastError = reason;
+}
+
+std::string AudioEngine::getLastError() const {
+    std::lock_guard<std::mutex> lock(mLastErrorMutex);
+    return mLastError;
+}
+
 oboe::Result AudioEngine::openOutputStream(oboe::SharingMode sharingMode) {
     oboe::AudioStreamBuilder builder;
     builder.setDirection(oboe::Direction::Output)
@@ -215,6 +235,8 @@ void AudioEngine::onErrorAfterClose(oboe::AudioStream* /*stream*/, oboe::Result 
     if (!mRunning.load()) {
         return;
     }
+    setLastError(std::string("the audio device dropped mid-session: ") +
+                 oboe::convertToText(error));
     // Oboe has already closed the stream by this point. Run the rest of the
     // teardown on a detached thread because stop() joins the network thread,
     // which must not be done from the Oboe callback thread.

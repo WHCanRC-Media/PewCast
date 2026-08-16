@@ -104,10 +104,21 @@ fun ListeningScreen(
         }
     }
 
-    // Reflect external stop (notification action, Bluetooth button) into UI state.
+    // Keep UI state in sync with the service in both directions.
     val servicePlaying = playbackService?.isPlaying?.collectAsState()?.value ?: false
     LaunchedEffect(servicePlaying) {
-        if (!servicePlaying && isConnected) {
+        val svc = playbackService
+        if (servicePlaying && !isConnected && svc != null) {
+            // The service outlives the activity, so a fresh composition can land on
+            // a session that is still playing. Adopt it — showing a disconnected UI
+            // over live audio leaves force-stop as the only way out.
+            clientId = svc.clientId
+            if (svc.serverAddress.isNotBlank()) serverAddress = svc.serverAddress
+            isConnecting = false
+            connectionError = null
+            isConnected = true
+        } else if (!servicePlaying && isConnected) {
+            // External stop (notification action, Bluetooth button).
             isConnected = false
             isConnecting = false
             val cid = clientId
@@ -303,28 +314,45 @@ fun ListeningScreen(
                 connectionError = null
                 isConnecting = true
                 scope.launch {
+                    val addr = serverAddress
                     val result = withContext(Dispatchers.IO) {
-                        val host = serverAddress.substringBefore(":")
+                        val host = addr.substringBefore(":")
+                        // preparePlayback drops any session the UI lost track of;
+                        // release it server-side instead of waiting for the reaper.
+                        val staleId = svc.clientId
+                        val staleAddr = svc.serverAddress
                         val listenPort = svc.preparePlayback(host, targetBufferMs.roundToInt())
-                            ?: return@withContext "Failed to start audio engine"
-                        val joinResult = httpJoin(serverAddress, listenPort)
-                        if (joinResult == null) {
-                            svc.abortPlayback()
-                            return@withContext "Failed to connect to server"
+                        if (staleId != null && staleAddr.isNotBlank()) httpLeave(staleAddr, staleId)
+                        if (listenPort == null) {
+                            // The native layer records why; without it every cause
+                            // (no audio endpoint, HAL busy, socket refused) looks
+                            // identical on screen and needs adb logcat to tell apart.
+                            val reason = svc.engine.getLastError()
+                            return@withContext "Failed to start audio engine: " +
+                                reason.ifBlank { "reason blank" }
                         }
-                        clientId = joinResult
-                        null
+                        when (val joinResult = httpJoin(addr, listenPort)) {
+                            is JoinOutcome.Failure -> {
+                                svc.abortPlayback()
+                                "Failed to connect to server: ${joinResult.reason}"
+                            }
+                            is JoinOutcome.Success -> {
+                                clientId = joinResult.clientId
+                                null
+                            }
+                        }
                     }
                     isConnecting = false
+                    val cid = clientId
                     if (result != null) {
                         connectionError = result
-                    } else {
+                    } else if (cid != null) {
                         // startForegroundService + startForeground must happen together
                         // on API 26+ so the OS doesn't ANR us.
                         ContextCompat.startForegroundService(
                             context, Intent(context, PlaybackService::class.java)
                         )
-                        svc.commitPlayback()
+                        svc.commitPlayback(cid, addr)
                         isConnected = true
                     }
                 }
@@ -672,7 +700,13 @@ private fun fetchServerStatus(serverAddress: String): ServerStatus? {
     }
 }
 
-private fun httpJoin(serverAddress: String, listenPort: Int): String? {
+/** Outcome of a join attempt. [Failure] carries a reason fit to show on screen. */
+private sealed interface JoinOutcome {
+    data class Success(val clientId: String) : JoinOutcome
+    data class Failure(val reason: String) : JoinOutcome
+}
+
+private fun httpJoin(serverAddress: String, listenPort: Int): JoinOutcome {
     return try {
         val url = URL("https://$serverAddress/udp/join")
         val conn = openConnection(url).apply {
@@ -684,17 +718,33 @@ private fun httpJoin(serverAddress: String, listenPort: Int): String? {
         }
         val body = JSONObject().put("port", listenPort).toString()
         conn.outputStream.use { it.write(body.toByteArray()) }
-        if (conn.responseCode == 200) {
+        val code = conn.responseCode
+        if (code == 200) {
             val resp = conn.inputStream.bufferedReader().readText()
-            JSONObject(resp).getString("client_id")
+            JoinOutcome.Success(JSONObject(resp).getString("client_id"))
         } else {
-            Log.e(TAG, "Join failed: HTTP ${conn.responseCode}")
-            null
+            val detail = try {
+                conn.errorStream?.bufferedReader()?.readText()?.trim().orEmpty()
+            } catch (_: Exception) {
+                ""
+            }
+            Log.e(TAG, "Join failed: HTTP $code $detail")
+            JoinOutcome.Failure(
+                "HTTP $code" + if (detail.isBlank()) "" else " — ${detail.take(120)}"
+            )
         }
     } catch (e: Exception) {
+        // Covers connect/TLS/timeout failures and a malformed response body alike;
+        // the exception type is the part that says which.
         Log.e(TAG, "Join error: $e")
-        null
+        JoinOutcome.Failure(describeException(e))
     }
+}
+
+private fun describeException(e: Exception): String {
+    val name = e.javaClass.simpleName.ifBlank { e.javaClass.name }
+    val msg = e.message?.trim().orEmpty()
+    return if (msg.isBlank()) name else "$name: $msg"
 }
 
 private fun httpHeartbeat(serverAddress: String, clientId: String): Boolean {

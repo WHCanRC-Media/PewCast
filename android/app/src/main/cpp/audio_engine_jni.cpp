@@ -26,6 +26,11 @@ Java_org_whcanrc_pewcast_audio_AudioEngine_nativeGetListenPort(JNIEnv* env, jobj
     return gEngine ? gEngine->getListenPort() : 0;
 }
 
+JNIEXPORT jstring JNICALL
+Java_org_whcanrc_pewcast_audio_AudioEngine_nativeGetLastError(JNIEnv* env, jobject thiz) {
+    return env->NewStringUTF(gEngine ? gEngine->getLastError().c_str() : "");
+}
+
 JNIEXPORT void JNICALL
 Java_org_whcanrc_pewcast_audio_AudioEngine_nativeStop(JNIEnv* env, jobject thiz) {
     if (gEngine) {
